@@ -6,7 +6,7 @@ DOMAIN="trojan.frankcn.dpdns.org"
 TUNNEL_NAME="trojan-tunnel"
 CONFIG_DIR="/etc/cloudflared"
 TUNNEL_DIR="${CONFIG_DIR}/tunnels"
-TROJAN_PASSWORD="5RmYpsF02tP9bZK1Dbcc76RrLGCtzajB"  # 替换为你的密码
+TROJAN_PASSWORD="trojan-password"  # 替换为你的密码
 
 echo "📦 安装依赖..."
 apt update -y
@@ -38,9 +38,18 @@ tar -zxf sing-box-${SING_BOX_VERSION}-${PLATFORM}.tar.gz
 cp sing-box-${SING_BOX_VERSION}-${PLATFORM}/sing-box /usr/bin/sb
 chmod +x /usr/bin/sb
 
-# ========== Cloudflare 登陆授权 ==========
+# ========== Cloudflare 授权 ==========
 echo "🌐 Cloudflare 授权..."
-cloudflared tunnel login
+
+if [ -f "/root/.cloudflared/cert.pem" ]; then
+  echo "✅ 检测到已有 cert.pem"
+else
+  echo "⚠️ 未检测到 cert.pem，尝试 login..."
+  if ! cloudflared tunnel login; then
+    echo "❌ Cloudflare 登陆失败，请手动执行: cloudflared tunnel login 并授权"
+    exit 1
+  fi
+fi
 
 # ========== 删除旧 Tunnel ==========
 if cloudflared tunnel list | grep -Fq "$TUNNEL_NAME"; then
@@ -49,7 +58,10 @@ if cloudflared tunnel list | grep -Fq "$TUNNEL_NAME"; then
 fi
 
 # ========== 创建新 Tunnel ==========
-cloudflared tunnel create "$TUNNEL_NAME"
+if ! cloudflared tunnel create "$TUNNEL_NAME"; then
+  echo "❌ 新 tunnel 创建失败，请手动执行: cloudflared tunnel login 并确认接受此设备访问权限"
+  exit 1
+fi
 
 # ========== 获取 Tunnel ID ==========
 TUNNEL_ID=$(cloudflared tunnel list --output json | jq -r '.[] | select(.name=="'$TUNNEL_NAME'") | .id')
@@ -129,7 +141,7 @@ systemctl restart sb cloudflared
 sleep 5
 
 # ========== 更新 DNS CNAME ==========
-API_TOKEN="BDNFhb_qCI19R8h9x8IOaTlTCTWTbGo_ZzOxRocn"  # 记得替换
+API_TOKEN="你的_API_TOKEN"  # 记得替换
 ROOT_DOMAIN="frankcn.dpdns.org"
 SUBDOMAIN="$DOMAIN"
 

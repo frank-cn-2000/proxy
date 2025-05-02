@@ -7,9 +7,6 @@ TUNNEL_NAME="trojan-tunnel"
 CONFIG_DIR="/etc/cloudflared"
 TUNNEL_DIR="${CONFIG_DIR}/tunnels"
 TROJAN_PASSWORD="trojan-password"  # 替换为你的密码
-API_TOKEN="你的_API_TOKEN"  # 替换为你的 Cloudflare API Token
-ROOT_DOMAIN="frankcn.dpdns.org"
-SUBDOMAIN="$DOMAIN"
 
 echo "📦 安装依赖..."
 apt update -y
@@ -21,12 +18,12 @@ systemctl stop sb || true
 systemctl stop cloudflared || true
 
 # ========== 安装 cloudflared ==========
-echo "📥 安装 cloudflared..."
+echo "📅 安装 cloudflared..."
 wget -O /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 chmod +x /usr/local/bin/cloudflared
 
 # ========== 安装 sing-box ==========
-echo "📥 安装 sing-box..."
+echo "📅 安装 sing-box..."
 ARCH=$(uname -m)
 SING_BOX_VERSION="1.8.5"
 case "$ARCH" in
@@ -48,13 +45,13 @@ if [ -f "/root/.cloudflared/cert.pem" ]; then
   echo "✅ 检测到已有 cert.pem"
 else
   echo "⚠️ 未检测到 cert.pem，尝试 login..."
-  LOGIN_OUTPUT=$(cloudflared tunnel login 2>&1)
-  LOGIN_URL=$(echo "$LOGIN_OUTPUT" | grep -oE 'https://.*cloudflare.com.*')
+  LOGIN_OUTPUT=$(cloudflared tunnel login 2>&1 || true)
+  LOGIN_URL=$(echo "$LOGIN_OUTPUT" | grep -oE 'https://[a-zA-Z0-9./?=_-]*cloudflare.com[a-zA-Z0-9./?=_-]*')
   if [ -n "$LOGIN_URL" ]; then
     echo "👉 请在浏览器中打开以下 URL 以完成授权："
     echo "$LOGIN_URL"
   fi
-  echo "⏳ 等待用户在浏览器中完成授权（最长等待3分钟）..."
+  echo "⏳ 等待用户在浏览器中完成授权（最多等待3分钟）..."
   for i in {1..18}; do
     if [ -f "/root/.cloudflared/cert.pem" ]; then
       echo "✅ 授权成功！"
@@ -77,7 +74,7 @@ fi
 # ========== 创建新 Tunnel ==========
 if ! cloudflared tunnel create "$TUNNEL_NAME"; then
   echo "❌ 新 tunnel 创建失败，请手动执行: cloudflared tunnel login 并确认接受此设备访问权限"
-  echo "⏳ 等待用户授权并重试 tunnel 创建（最长等待3分钟）..."
+  echo "⏳ 等待用户授权并重试 tunnel 创建（最多等待3分钟）..."
   for i in {1..18}; do
     if cloudflared tunnel create "$TUNNEL_NAME"; then
       echo "✅ Tunnel 创建成功！"
@@ -94,7 +91,7 @@ fi
 # ========== 获取 Tunnel ID ==========
 TUNNEL_ID=$(cloudflared tunnel list --output json | jq -r '.[] | select(.name=="'$TUNNEL_NAME'") | .id')
 
-# ========== 配置 sing-box（Trojan） ==========
+# ========== 配置 sing-box (Trojan) ==========
 mkdir -p /etc/sb
 cat <<EOF > /etc/sb/config.json
 {
@@ -169,6 +166,10 @@ systemctl restart sb cloudflared
 sleep 5
 
 # ========== 更新 DNS CNAME ==========
+API_TOKEN="你的_API_TOKEN"  # 记得替换
+ROOT_DOMAIN="frankcn.dpdns.org"
+SUBDOMAIN="$DOMAIN"
+
 ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$ROOT_DOMAIN" \
   -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" | jq -r '.result[0].id')
 
@@ -176,7 +177,7 @@ DNS_RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE
   -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" | jq -r '.result[0].id')
 
 if [ "$DNS_RECORD_ID" == "null" ] || [ -z "$DNS_RECORD_ID" ]; then
-  echo "🌟 创建 DNS CNAME 记录..."
+  echo "🌟 创建 DNS CNAME  记录..."
   curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
     -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
     --data '{

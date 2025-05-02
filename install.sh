@@ -10,20 +10,20 @@ TROJAN_PASSWORD="trojan-password"  # 替换为你的密码
 
 echo "📦 安装依赖..."
 apt update -y
-apt install -y curl wget unzip qrencode
+apt install -y curl wget unzip qrencode jq
 
-# ========== 停止已有服务 ==========
+# ========== 停止旧服务 ==========
 echo "🛑 停止旧服务..."
 systemctl stop sb || true
 systemctl stop cloudflared || true
 
 # ========== 安装 cloudflared ==========
-echo "📥 安装 cloudflared..."
+echo "📅 安装 cloudflared..."
 wget -O /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
 chmod +x /usr/local/bin/cloudflared
 
 # ========== 安装 sing-box ==========
-echo "📥 安装 sing-box..."
+echo "📅 安装 sing-box..."
 ARCH=$(uname -m)
 SING_BOX_VERSION="1.8.5"
 case "$ARCH" in
@@ -38,7 +38,7 @@ tar -zxf sing-box-${SING_BOX_VERSION}-${PLATFORM}.tar.gz
 cp sing-box-${SING_BOX_VERSION}-${PLATFORM}/sing-box /usr/bin/sb
 chmod +x /usr/bin/sb
 
-# ========== Cloudflare 登录授权 ==========
+# ========== Cloudflare 登陆授权 ==========
 echo "🌐 Cloudflare 授权..."
 cloudflared tunnel login
 
@@ -51,7 +51,10 @@ fi
 # ========== 创建新 Tunnel ==========
 cloudflared tunnel create "$TUNNEL_NAME"
 
-# ========== 配置 sing-box（Trojan） ==========
+# ========== 获取 Tunnel ID ==========
+TUNNEL_ID=$(cloudflared tunnel list --output json | jq -r '.[] | select(.name=="'$TUNNEL_NAME'") | .id')
+
+# ========== 配置 sing-box (Trojan) ==========
 mkdir -p /etc/sb
 cat <<EOF > /etc/sb/config.json
 {
@@ -69,7 +72,6 @@ cat <<EOF > /etc/sb/config.json
 EOF
 
 # ========== 配置 cloudflared ==========
-TUNNEL_ID=$(cloudflared tunnel list | grep "$TUNNEL_NAME" | awk '{print $1}')
 mkdir -p "$CONFIG_DIR" "$TUNNEL_DIR"
 cp /root/.cloudflared/${TUNNEL_ID}.json "$TUNNEL_DIR"
 
@@ -109,7 +111,7 @@ Description=Cloudflare Tunnel
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run "$TUNNEL_NAME"
 Restart=always
 RestartSec=5
 User=root
@@ -127,7 +129,7 @@ systemctl restart sb cloudflared
 sleep 5
 
 # ========== 更新 DNS CNAME ==========
-API_TOKEN="你的_API_TOKEN"  # 记得替换为你的 Cloudflare Token
+API_TOKEN="你的_API_TOKEN"  # 记得替换
 ROOT_DOMAIN="frankcn.dpdns.org"
 SUBDOMAIN="$DOMAIN"
 
@@ -137,15 +139,29 @@ ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$ROOT_
 DNS_RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=CNAME&name=$SUBDOMAIN" \
   -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" | jq -r '.result[0].id')
 
-curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$DNS_RECORD_ID" \
-  -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
-  --data '{
-    "type": "CNAME",
-    "name": "'"$SUBDOMAIN"'",
-    "content": "'"$TUNNEL_ID"'.cfargotunnel.com",
-    "ttl": 120,
-    "proxied": true
-}'
+if [ "$DNS_RECORD_ID" == "null" ] || [ -z "$DNS_RECORD_ID" ]; then
+  echo "🌟 创建 DNS CNAME  记录..."
+  curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
+    -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+    --data '{
+      "type": "CNAME",
+      "name": "'"$SUBDOMAIN"'",
+      "content": "'"$TUNNEL_ID"'.cfargotunnel.com",
+      "ttl": 120,
+      "proxied": true
+    }'
+else
+  echo "🔄 更新 DNS CNAME 记录..."
+  curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$DNS_RECORD_ID" \
+    -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+    --data '{
+      "type": "CNAME",
+      "name": "'"$SUBDOMAIN"'",
+      "content": "'"$TUNNEL_ID"'.cfargotunnel.com",
+      "ttl": 120,
+      "proxied": true
+    }'
+fi
 
 # ========== 输出 Trojan 地址和二维码 ==========
 TROJAN_LINK="trojan://$TROJAN_PASSWORD@$DOMAIN:443?peer=$DOMAIN#MyTrojan"

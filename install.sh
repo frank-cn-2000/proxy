@@ -45,10 +45,20 @@ if [ -f "/root/.cloudflared/cert.pem" ]; then
   echo "✅ 检测到已有 cert.pem"
 else
   echo "⚠️ 未检测到 cert.pem，尝试 login..."
-  if ! cloudflared tunnel login; then
-    echo "❌ Cloudflare 登陆失败，请手动执行: cloudflared tunnel login 并授权"
-    exit 1
-  fi
+  cloudflared tunnel login || {
+    echo "⏳ 等待用户在浏览器中完成授权（最长等待3分钟）..."
+    for i in {1..180}; do
+      if [ -f "/root/.cloudflared/cert.pem" ]; then
+        echo "✅ 授权成功！"
+        break
+      fi
+      sleep 1
+    done
+    if [ ! -f "/root/.cloudflared/cert.pem" ]; then
+      echo "❌ 超时仍未检测到 cert.pem，退出。"
+      exit 1
+    fi
+  }
 fi
 
 # ========== 删除旧 Tunnel ==========
@@ -60,7 +70,18 @@ fi
 # ========== 创建新 Tunnel ==========
 if ! cloudflared tunnel create "$TUNNEL_NAME"; then
   echo "❌ 新 tunnel 创建失败，请手动执行: cloudflared tunnel login 并确认接受此设备访问权限"
-  exit 1
+  echo "⏳ 等待用户授权并重试 tunnel 创建（最长等待3分钟）..."
+  for i in {1..180}; do
+    if cloudflared tunnel create "$TUNNEL_NAME"; then
+      echo "✅ Tunnel 创建成功！"
+      break
+    fi
+    sleep 1
+  done
+  if ! cloudflared tunnel list | grep -Fq "$TUNNEL_NAME"; then
+    echo "❌ 超时仍未能成功创建 tunnel，退出。"
+    exit 1
+  fi
 fi
 
 # ========== 获取 Tunnel ID ==========

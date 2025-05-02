@@ -170,7 +170,7 @@ systemctl restart cloudflared
 sleep 5
 
 # ========== 更新CNAME记录 ========== 
-API_TOKEN="57bYmP6bAIrsWG1L7PYEJ7rI7ATEASZXgEv-0vPl"
+API_TOKEN="BDNFhb_qCI19R8h9x8IOaTlTCTWTbGo_ZzOxRocn"
 DOMAIN="frankcn.dpdns.org"      # 根域名
 SUBDOMAIN="socks.frankcn.dpdns.org" # 要更新的子域名
 TUNNEL_ID=$(jq -r '.TunnelID' "$(ls /root/.cloudflared/*.json | head -n 1)")

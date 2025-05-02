@@ -129,7 +129,7 @@ systemctl restart sb cloudflared
 sleep 5
 
 # ========== 更新 DNS CNAME ==========
-API_TOKEN="你的_API_TOKEN"  # 记得替换
+API_TOKEN="BDNFhb_qCI19R8h9x8IOaTlTCTWTbGo_ZzOxRocn"  # 记得替换
 ROOT_DOMAIN="frankcn.dpdns.org"
 SUBDOMAIN="$DOMAIN"
 

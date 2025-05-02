@@ -6,7 +6,7 @@ DOMAIN="trojan.frankcn.dpdns.org"
 TUNNEL_NAME="trojan-tunnel"
 CONFIG_DIR="/etc/cloudflared"
 TUNNEL_DIR="${CONFIG_DIR}/tunnels"
-TROJAN_PASSWORD="trojan-password"  # 替换为你的密码
+TROJAN_PASSWORD="E1=#nr7boC"  # 替换为你的密码
 
 echo "📦 安装依赖..."
 apt update -y

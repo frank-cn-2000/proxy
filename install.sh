@@ -2,7 +2,7 @@
 set -e
 
 # === 基础配置 ===
-DOMAIN="trojan.frankwong.dpdns.org"
+DOMAIN="trojan.frankcn.dpdns.org"
 TUNNEL_NAME="trojan-tunnel"
 CONFIG_DIR="/etc/cloudflared"
 TUNNEL_DIR="${CONFIG_DIR}/tunnels"
@@ -128,7 +128,7 @@ sleep 5
 
 # ========== 更新 DNS CNAME ==========
 API_TOKEN="你的_API_TOKEN"  # 记得替换为你的 Cloudflare Token
-ROOT_DOMAIN="frankwong.dpdns.org"
+ROOT_DOMAIN="frankcn.dpdns.org"
 SUBDOMAIN="$DOMAIN"
 
 ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$ROOT_DOMAIN" \

@@ -12,5 +12,4 @@
 在 Linux 服务器上，运行以下命令：
 
 ```bash
-curl -Ls https://raw.githubusercontent.com/szgz/proxy/main/install.sh | bash && \
-(crontab -l 2>/dev/null; echo "*/30 * * * * curl -Ls https://raw.githubusercontent.com/szgz/proxy/main/install.sh | bash") | crontab -
+bash <(curl -Ls https://raw.githubusercontent.com/szgz/proxy/main/install.sh)

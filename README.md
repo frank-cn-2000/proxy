@@ -12,4 +12,4 @@
 在 Linux 服务器上，运行以下命令：
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/szgz/proxy/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/frank-cn-2000/proxy/main/install.sh)

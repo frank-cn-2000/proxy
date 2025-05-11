@@ -2,14 +2,14 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Modified for direct script configuration, random internal params, and uninstall support)
+# Author: AI Assistant (Relies on server-side cloudflared to fetch cert)
 
 # --- USER CONFIGURABLE VARIABLES ---
 # !!! 请在运行脚本前修改以下变量 !!!
 # ------------------------------------
 # 将 YOUR_DOMAIN 替换为您的域名 (例如：vless.yourdomain.com)
 # 确保此域名已在 Cloudflare 解析，或者至少 NS 记录指向 Cloudflare。
-YOUR_DOMAIN="frankcn.dpdns.org"
+YOUR_DOMAIN=""
 # ------------------------------------
 # VLESS_UUID, SINGBOX_PORT, 和 WS_PATH 将在脚本运行时自动随机生成。
 # --- END OF USER CONFIGURABLE VARIABLES ---
@@ -22,6 +22,7 @@ WS_PATH=""
 DOMAIN="" # Will be set from YOUR_DOMAIN
 TUNNEL_ID="" # Will be set during Cloudflare Tunnel creation
 TUNNEL_NAME="" # Will be set during Cloudflare Tunnel creation
+CLOUDFLARED_CRED_DIR="/root/.cloudflared" # Standard path for root user
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -52,6 +53,9 @@ check_root() {
         log_error "此脚本需要 root 权限运行。请使用 'sudo bash $0'。"
         exit 1
     fi
+    # Ensure cloudflared credentials directory exists and has correct permissions for root
+    mkdir -p "$CLOUDFLARED_CRED_DIR"
+    chmod 700 "$CLOUDFLARED_CRED_DIR"
 }
 
 validate_and_set_configs() {
@@ -144,9 +148,6 @@ install_singbox() {
         exit 1
     fi
 
-    EXTRACT_DIR_NAME="sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}"
-    # Check if extracted directory name might have 'hf' suffix for armv7
-    # List contents to find the actual directory name
     ACTUAL_EXTRACT_DIR=$(tar -tzf sing-box.tar.gz | head -n1 | cut -f1 -d"/")
     if [ -z "$ACTUAL_EXTRACT_DIR" ]; then
         log_error "无法确定解压后的目录名。"
@@ -232,17 +233,39 @@ configure_cloudflared_tunnel() {
     SANITIZED_DOMAIN=$(echo "$DOMAIN" | tr '.' '-')
     TUNNEL_NAME="sb-${SANITIZED_DOMAIN}-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 4)"
 
-    log_warning "接下来您需要登录您的 Cloudflare 账户。"
-    log_warning "请复制以下链接并在浏览器中打开进行授权。"
-    cloudflared tunnel login
+    log_warning "Cloudflare Tunnel 需要授权。"
+    log_warning "请复制接下来显示的 URL，在您的本地计算机浏览器中打开，并授权访问您的 Cloudflare 账户。"
+    log_warning "授权完成后，此脚本会自动继续。"
+    echo ""
+    # The cloudflared tunnel login command will block until authentication is complete
+    # on the browser, and then it should download cert.pem to $CLOUDFLARED_CRED_DIR/cert.pem
+    if ! cloudflared tunnel login; then
+        log_error "Cloudflare 登录失败。请检查错误信息。"
+        log_error "确保您在本地浏览器中正确完成了授权步骤。"
+        log_error "您可能需要手动检查 ${CLOUDFLARED_CRED_DIR}/cert.pem 是否存在。"
+        exit 1
+    fi
 
-    if ! cloudflared tunnel list > /dev/null 2>&1; then
-       log_warning "Cloudflare 登录可能未完成或检测失败。脚本将继续，但如果后续步骤失败，请手动执行 'cloudflared tunnel login' 并重新运行部分配置。"
+    log_success "Cloudflare 登录授权似乎已完成。"
+    
+    # Verify that cert.pem was downloaded to the server
+    if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then
+        log_error "Cloudflare 授权证书 (cert.pem) 未在服务器的 ${CLOUDFLARED_CRED_DIR}/cert.pem 路径下找到。"
+        log_error "请确认以下几点："
+        log_error "1. 您已在本地浏览器中成功完成了授权步骤。"
+        log_error "2. 服务器上的 'cloudflared tunnel login' 命令没有提前中断。"
+        log_error "3. 服务器具有正常的网络连接以下载证书。"
+        log_error "4. /root/.cloudflared 目录权限正确 (脚本尝试设置为 700)。"
+        log_warning "您可以尝试手动将您本地下载的 cert.pem 文件上传到服务器的 ${CLOUDFLARED_CRED_DIR}/cert.pem 位置，然后重新运行此脚本的这一部分或完整脚本。"
+        exit 1
+    else
+        log_success "Cloudflare 授权证书 (cert.pem) 已在服务器 ${CLOUDFLARED_CRED_DIR}/cert.pem 找到。"
     fi
     
     log_info "正在创建或查找 Tunnel: $TUNNEL_NAME"
     
     TUNNEL_INFO_OUTPUT_FILE=$(mktemp)
+    # When creating a tunnel, cloudflared uses cert.pem and then saves a <TUNNEL_ID>.json credential specific to this tunnel
     cloudflared tunnel create "$TUNNEL_NAME" > "$TUNNEL_INFO_OUTPUT_FILE" 2>&1
     TUNNEL_CREATE_OUTPUT=$(cat "$TUNNEL_INFO_OUTPUT_FILE")
     
@@ -263,6 +286,16 @@ configure_cloudflared_tunnel() {
         log_success "Tunnel '$TUNNEL_NAME' (ID: $TUNNEL_ID) 创建成功。"
     fi
     rm -f "$TUNNEL_INFO_OUTPUT_FILE"
+
+    # After tunnel creation, a <TUNNEL_ID>.json file should exist
+    local tunnel_json_cred="${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json"
+    if [ ! -f "$tunnel_json_cred" ]; then
+        log_warning "Tunnel 特定凭证文件 '${tunnel_json_cred}' 未找到。"
+        log_warning "这可能表明 Tunnel 创建过程中存在问题，或者 cloudflared 的行为有所变化。"
+        log_warning "服务可能依赖于全局的 cert.pem，但这并非最佳实践。"
+    else
+        log_success "Tunnel 特定凭证文件 '${tunnel_json_cred}' 已找到。"
+    fi
     
     log_info "正在为域名 $DOMAIN 创建 DNS CNAME 记录指向 Tunnel..."
     if ! cloudflared tunnel route dns "$TUNNEL_ID" "$DOMAIN"; then
@@ -272,19 +305,14 @@ configure_cloudflared_tunnel() {
         log_success "DNS 记录创建/验证成功。"
     fi
 
-    mkdir -p /etc/cloudflared/
-    CREDENTIALS_FILE_PATH="/root/.cloudflared/${TUNNEL_ID}.json" 
-    DEFAULT_CRED_FILE="/root/.cloudflared/cert.pem"
-
-    if [ ! -f "$CREDENTIALS_FILE_PATH" ] && [ ! -f "$DEFAULT_CRED_FILE" ]; then
-        log_warning "Cloudflare Tunnel 凭证文件 ('${TUNNEL_ID}.json' 或 'cert.pem') 在 /root/.cloudflared/ 中未找到。"
-        log_warning "请确保 'cloudflared tunnel login' 成功。Tunnel 服务可能无法启动。"
-    fi
-
+    mkdir -p /etc/cloudflared/ # Configuration for cloudflared service
+    
     cat > /etc/cloudflared/config.yml <<EOF
 # This config file is used by 'cloudflared tunnel run <TUNNEL_ID_OR_NAME>'
 # The tunnel ID/name is specified on the command line.
 # Ingress rules defined here will apply to that tunnel.
+# Credentials will be picked up from the default location: ${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json or ${CLOUDFLARED_CRED_DIR}/cert.pem
+
 ingress:
   - hostname: ${DOMAIN}
     service: http://127.0.0.1:${SINGBOX_PORT}
@@ -326,6 +354,7 @@ After=network.target
 [Service]
 TimeoutStartSec=0
 Type=notify
+# cloudflared will use credentials from $CLOUDFLARED_CRED_DIR ($TUNNEL_ID.json or cert.pem)
 ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --config /etc/cloudflared/config.yml run ${TUNNEL_ID}
 Restart=on-failure
 RestartSec=5s
@@ -422,9 +451,8 @@ urlencode() {
 save_installation_details() {
     log_info "正在保存安装详情以便卸载..."
     STATE_FILE="/etc/sing-box/install_details.env"
-    mkdir -p "$(dirname "$STATE_FILE")" # Ensure directory exists
+    mkdir -p "$(dirname "$STATE_FILE")" 
     
-    # Backup existing state file if it exists
     if [ -f "$STATE_FILE" ]; then
         mv "$STATE_FILE" "${STATE_FILE}.bak_$(date +%Y%m%d%H%M%S)"
         log_info "已备份旧的安装详情文件到: ${STATE_FILE}.bak_..."
@@ -432,7 +460,7 @@ save_installation_details() {
 
     echo "# Sing-box VLESS Cloudflare Tunnel Installation Details" > "$STATE_FILE"
     echo "DOMAIN=\"${DOMAIN}\"" >> "$STATE_FILE"
-    echo "VLESS_UUID=\"${VLESS_UUID}\"" >> "$STATE_FILE" # Added for potential verification during uninstall
+    echo "VLESS_UUID=\"${VLESS_UUID}\"" >> "$STATE_FILE"
     echo "SINGBOX_PORT=\"${SINGBOX_PORT}\"" >> "$STATE_FILE"
     echo "WS_PATH=\"${WS_PATH}\"" >> "$STATE_FILE"
     echo "TUNNEL_ID=\"${TUNNEL_ID}\"" >> "$STATE_FILE"
@@ -443,25 +471,25 @@ save_installation_details() {
     echo "CLOUDFLARED_CONFIG_DIR=\"/etc/cloudflared\"" >> "$STATE_FILE"
     echo "SINGBOX_EXECUTABLE=\"/usr/local/bin/sing-box\"" >> "$STATE_FILE"
     echo "CLOUDFLARED_EXECUTABLE=\"/usr/local/bin/cloudflared\"" >> "$STATE_FILE"
-    echo "CLOUDFLARED_CREDENTIALS_DIR=\"/root/.cloudflared\"" >> "$STATE_FILE"
-    chmod 600 "$STATE_FILE" # Restrict permissions
+    echo "CLOUDFLARED_CRED_DIR=\"${CLOUDFLARED_CRED_DIR}\"" >> "$STATE_FILE" # Use variable
+    chmod 600 "$STATE_FILE"
     log_success "安装详情已保存到: $STATE_FILE"
 }
 
 # --- Main Script ---
 main() {
-    check_root
+    check_root # This now also ensures $CLOUDFLARED_CRED_DIR exists
     validate_and_set_configs
     detect_arch
     install_dependencies
     install_singbox
     install_cloudflared
-    configure_cloudflared_tunnel
+    configure_cloudflared_tunnel # Modified to verify server-side cert.pem
     setup_systemd_services
     generate_client_configs
-    save_installation_details # Save details for uninstallation
+    save_installation_details
     log_success "所有操作已完成！"
-    log_info "如果 Cloudflared 服务无法连接，请检查 '/root/.cloudflared/' 中的凭证，并在 Cloudflare Dashboard 检查 Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 的状态。"
+    log_info "如果 Cloudflared 服务无法连接，请检查 ${CLOUDFLARED_CRED_DIR} 中的凭证，并在 Cloudflare Dashboard 检查 Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 的状态。"
 }
 
 main

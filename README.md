@@ -20,3 +20,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/frank-cn-2000/proxy/main/insta
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/frank-cn-2000/proxy/main/proxy_install.sh)
 ```
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/frank-cn-2000/proxy/main/proxy_uninstall.sh)
+```

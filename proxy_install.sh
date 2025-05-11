@@ -114,35 +114,37 @@ install_dependencies() {
 # --- Cloudflare API Functions ---
 cf_api_call() {
     local method="$1" path="$2" data="$3"
-    local response_output response_body http_code
-    local curl_opts=(-s -w "\n%{http_code}" \
+    local response_body http_code temp_file
+    temp_file=$(mktemp) # Create a temporary file to store the response body
+
+    local curl_opts=(-s -w "%{http_code}" \
         -H "Authorization: Bearer ${CF_API_TOKEN}" \
-        -H "Content-Type: application/json")
+        -H "Content-Type: application/json" \
+        -o "$temp_file") # Output body to temp file
 
     if [[ "$method" == "GET" || "$method" == "DELETE" ]]; then
-        response_output=$(curl "${curl_opts[@]}" -X "$method" "${CLOUDFLARE_API_ENDPOINT}${path}")
+        http_code=$(curl "${curl_opts[@]}" -X "$method" "${CLOUDFLARE_API_ENDPOINT}${path}")
     elif [[ "$method" == "POST" || "$method" == "PUT" ]]; then
-        response_output=$(curl "${curl_opts[@]}" -X "$method" --data "$data" "${CLOUDFLARE_API_ENDPOINT}${path}")
+        http_code=$(curl "${curl_opts[@]}" -X "$method" --data "$data" "${CLOUDFLARE_API_ENDPOINT}${path}")
     else
-        log_error "不支持的 HTTP 方法: $method"; return 1
+        log_error "不支持的 HTTP 方法: $method"; rm -f "$temp_file"; return 1
     fi
 
-    http_code=$(echo "$response_output" | tail -n1)
-    response_body=$(echo "$response_output" | sed '$d')
+    response_body=$(cat "$temp_file")
+    rm -f "$temp_file"
 
     if ! [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
         local errors
-        if echo "$response_body" | jq -e . >/dev/null 2>&1; then
+        if echo "$response_body" | jq -e . >/dev/null 2>&1; then # Check if response_body is valid JSON
             errors=$(echo "$response_body" | jq -r '.errors | map(.message) | join(", ") // "未知API错误 (响应非JSON或无错误信息)"')
         else
-            errors="API响应非JSON或为空 (HTTP $http_code)" # Removed $response_body from here to avoid overly long error messages in common cases
+            errors="API响应非JSON或为空 (HTTP $http_code)"
         fi
         log_error "Cloudflare API 调用失败 ($http_code $method $path): $errors"
-        # For detailed debugging, uncomment next line:
-        # log_info "失败的API响应体: $response_body"
+        # log_info "失败的API响应体: $response_body" # For debugging
         return 1
     fi
-    echo "$response_body"
+    echo "$response_body" # This is the JSON response body to stdout
     return 0
 }
 

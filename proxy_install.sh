@@ -351,18 +351,66 @@ EOF
 }
 
 generate_client_configs() {
-    local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)"
-    local ENCODED_WS_PATH=$(urlencode "${WS_PATH}"); local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
-    local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
+    local FAKE_HOST="netflix.com" # 定义伪装域名
+    log_info "为客户端配置生成信息 (SNI: ${DOMAIN}, WebSocket Host: ${FAKE_HOST})..." >&2 # 日志输出到 stderr
+
+    local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)-$(echo $FAKE_HOST | cut -d'.' -f1)"
+    local ENCODED_WS_PATH=$(urlencode "${WS_PATH}")
+    local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
+    # 注意 VLESS 链接中的参数:
+    # server (address): 仍然是你的 $DOMAIN
+    # sni: 仍然是你的 $DOMAIN
+    # host (WebSocket Host): 修改为 $FAKE_HOST
+    local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${FAKE_HOST}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
+
+    # --- 输出到 stdout 给用户 ---
     echo -e "---------------- VLESS 配置 ----------------"
-    echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}"
-    echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}"
-    echo -e "${GREEN}QR Code:${NC}"; qrencode -t ANSIUTF8 "${VLESS_LINK}"
-    echo -e "${BLUE}Sing-box JSON 片段:${NC}"
-    jq -n --arg tag "$REMARK_TAG" --arg server "$DOMAIN" --argjson port 443 --arg uuid "$VLESS_UUID" \
-          --arg sni "$DOMAIN" --arg path "$WS_PATH" --arg host "$DOMAIN" \
-    '{type:"vless",tag:$tag,server:$server,server_port:$port,uuid:$uuid,tls:{enabled:true,server_name:$sni,insecure:false},transport:{type:"ws",path:$path,headers:{Host:$host}}}'
+    echo -e "${YELLOW}域名 (Address/Server):${NC} ${DOMAIN}"
+    echo -e "${YELLOW}端口 (Port):${NC} 443"
+    echo -e "${YELLOW}用户 ID (UUID):${NC} ${VLESS_UUID}"
+    echo -e "${YELLOW}传输协议 (Network):${NC} ws (WebSocket)"
+    echo -e "${YELLOW}WebSocket 路径 (Path):${NC} ${WS_PATH}"
+    echo -e "${YELLOW}WebSocket Host (伪装域名):${NC} ${FAKE_HOST}" # 显示伪装域名
+    echo -e "${YELLOW}TLS/SSL:${NC} tls (由 Cloudflare 提供)"
+    echo -e "${YELLOW}SNI (Server Name Indication):${NC} ${DOMAIN}" # SNI 必须是真实域名
+    echo -e "--------------------------------------------------"
+    echo -e "${GREEN}VLESS 链接:${NC}"
+    echo -e "${VLESS_LINK}"
+    echo -e "--------------------------------------------------"
+    echo -e "${GREEN}QR Code:${NC}"
+    qrencode -t ANSIUTF8 "${VLESS_LINK}"
+    echo -e "--------------------------------------------------"
+    echo -e "${BLUE}Sing-box 客户端配置片段 (JSON):${NC}"
+    # 注意 JSON 中的对应字段
+    jq -n \
+      --arg tag "$REMARK_TAG" \
+      --arg server "$DOMAIN" \
+      --argjson port 443 \
+      --arg uuid "$VLESS_UUID" \
+      --arg sni "$DOMAIN" \
+      --arg path "$WS_PATH" \
+      --arg ws_host "$FAKE_HOST" \
+    '{
+      "type": "vless",
+      "tag": $tag,
+      "server": $server,
+      "server_port": $port,
+      "uuid": $uuid,
+      "tls": {
+        "enabled": true,
+        "server_name": $sni, 
+        "insecure": false 
+      },
+      "transport": {
+        "type": "ws",
+        "path": $path,
+        "headers": {
+          "Host": $ws_host
+        }
+      }
+    }'
     echo -e "--------------------------------------------"
+    # --- 结束输出到 stdout ---
 }
 
 urlencode() {

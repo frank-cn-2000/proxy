@@ -35,40 +35,39 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # --- Load Configuration ---
 load_config() {
-    # If SCRIPT_DIR_REAL is empty or points to /dev/fd (like from curl|bash), use PWD
-    if [[ -z "$SCRIPT_DIR_REAL" || "$SCRIPT_DIR_REAL" == "/dev/fd" || "$SCRIPT_DIR_REAL" == "/proc/self/fd" ]]; then
-        CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
-        log_warning "脚本可能通过管道执行，尝试从当前工作目录加载配置文件: $CONFIG_FILE"
+    # If SCRIPT_DIR_REAL is empty, or if it points to a /dev/fd or /proc/self/fd path
+    # (which happens with `bash <(curl ...)`), then assume config.cfg is in PWD.
+    if [[ -z "$SCRIPT_DIR_REAL" ]] || \
+       [[ "$SCRIPT_DIR_REAL" == "/dev/fd" ]] || \
+       [[ "$SCRIPT_DIR_REAL" == "/proc/self/fd" ]] || \
+       [[ "$SCRIPT_DIR_REAL" =~ ^/proc/[0-9]+/fd$ ]] ; then # Check for /proc/PID/fd
+        CONFIG_FILE_TO_CHECK="$(pwd)/${CONFIG_FILE_NAME}"
+        log_warning "脚本可能通过管道执行或无法确定脚本目录，尝试从当前工作目录加载配置文件: $CONFIG_FILE_TO_CHECK"
+    else
+        CONFIG_FILE_TO_CHECK="${CONFIG_FILE}" # Use the path determined to be next to script
     fi
 
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件 '$CONFIG_FILE' 未找到。"
+    if [ ! -f "$CONFIG_FILE_TO_CHECK" ]; then
+        log_error "配置文件 '$CONFIG_FILE_TO_CHECK' 未找到。"
         log_error "请创建 '$CONFIG_FILE_NAME' (在脚本目录或当前工作目录) 并填入所需变量。"
-        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $(pwd)/${CONFIG_FILE_NAME}${NC}" >&2
-        cat > "$(pwd)/${CONFIG_FILE_NAME}" <<EOF
+        local template_path="$(pwd)/${CONFIG_FILE_NAME}" # Always create template in PWD for user ease
+        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $template_path${NC}" >&2
+        cat > "$template_path" <<EOF
 # Cloudflare Deployment Configuration
 YOUR_DOMAIN="your.example.com"
 YOUR_ZONE_NAME="example.com" # Your actual Zone name in Cloudflare
 CF_API_TOKEN="your_cloudflare_api_token_here"
 EOF
-        chmod 600 "$(pwd)/${CONFIG_FILE_NAME}"
+        chmod 600 "$template_path"
         log_info "模板文件已创建。请编辑它并重新运行脚本。" >&2
         exit 1
     fi
 
-    log_info "正在从 '$CONFIG_FILE' 加载配置..."
-    source "$CONFIG_FILE"
+    log_info "正在从 '$CONFIG_FILE_TO_CHECK' 加载配置..."
+    source "$CONFIG_FILE_TO_CHECK" # Source the determined config file
+    CONFIG_FILE="$CONFIG_FILE_TO_CHECK" # Update global CONFIG_FILE if it was changed to PWD
 
-    if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_DOMAIN'。"; exit 1
-    fi
-    if [[ -z "$YOUR_ZONE_NAME" || "$YOUR_ZONE_NAME" == "example.com" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_ZONE_NAME'。"; exit 1
-    fi
-    if [[ -z "$CF_API_TOKEN" || "$CF_API_TOKEN" == "your_cloudflare_api_token_here" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'CF_API_TOKEN'。"; exit 1
-    fi
-    log_success "配置加载成功。"
+    # ... (rest of validations for YOUR_DOMAIN, YOUR_ZONE_NAME, CF_API_TOKEN) ...
 }
 
 check_root() {

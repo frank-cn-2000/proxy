@@ -2,7 +2,7 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Reads config.cfg, uses Cloudflare API for DNS, CNAME proxied:true)
+# Author: AI Assistant (Handles existing cert.pem, robust API calls, stderr logging)
 
 # --- Configuration File ---
 CONFIG_FILE_NAME="config.cfg"
@@ -35,39 +35,42 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # --- Load Configuration ---
 load_config() {
-    # If SCRIPT_DIR_REAL is empty, or if it points to a /dev/fd or /proc/self/fd path
-    # (which happens with `bash <(curl ...)`), then assume config.cfg is in PWD.
-    if [[ -z "$SCRIPT_DIR_REAL" ]] || \
-       [[ "$SCRIPT_DIR_REAL" == "/dev/fd" ]] || \
-       [[ "$SCRIPT_DIR_REAL" == "/proc/self/fd" ]] || \
-       [[ "$SCRIPT_DIR_REAL" =~ ^/proc/[0-9]+/fd$ ]] ; then # Check for /proc/PID/fd
-        CONFIG_FILE_TO_CHECK="$(pwd)/${CONFIG_FILE_NAME}"
-        log_warning "脚本可能通过管道执行或无法确定脚本目录，尝试从当前工作目录加载配置文件: $CONFIG_FILE_TO_CHECK"
-    else
-        CONFIG_FILE_TO_CHECK="${CONFIG_FILE}" # Use the path determined to be next to script
+    if [[ "$CONFIG_FILE" == "/dev/fd/${CONFIG_FILE_NAME}" || "$CONFIG_FILE" == "/proc/self/fd/${CONFIG_FILE_NAME}" || "$SCRIPT_DIR_REAL" =~ ^/proc/[0-9]+/fd || -z "$SCRIPT_DIR_REAL" ]]; then
+      CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+      log_warning "脚本通过管道执行或无法确定脚本目录，尝试从当前工作目录加载配置文件: $CONFIG_FILE"
     fi
 
-    if [ ! -f "$CONFIG_FILE_TO_CHECK" ]; then
-        log_error "配置文件 '$CONFIG_FILE_TO_CHECK' 未找到。"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_error "配置文件 '$CONFIG_FILE' 未找到。"
         log_error "请创建 '$CONFIG_FILE_NAME' (在脚本目录或当前工作目录) 并填入所需变量。"
-        local template_path="$(pwd)/${CONFIG_FILE_NAME}" # Always create template in PWD for user ease
-        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $template_path${NC}" >&2
-        cat > "$template_path" <<EOF
+        local template_creation_path="$(pwd)/${CONFIG_FILE_NAME}"
+        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $template_creation_path${NC}" >&2
+        cat > "$template_creation_path" <<EOF
 # Cloudflare Deployment Configuration
 YOUR_DOMAIN="your.example.com"
 YOUR_ZONE_NAME="example.com" # Your actual Zone name in Cloudflare
 CF_API_TOKEN="your_cloudflare_api_token_here"
 EOF
-        chmod 600 "$template_path"
+        chmod 600 "$template_creation_path"
         log_info "模板文件已创建。请编辑它并重新运行脚本。" >&2
         exit 1
     fi
 
-    log_info "正在从 '$CONFIG_FILE_TO_CHECK' 加载配置..."
-    source "$CONFIG_FILE_TO_CHECK" # Source the determined config file
-    CONFIG_FILE="$CONFIG_FILE_TO_CHECK" # Update global CONFIG_FILE if it was changed to PWD
+    log_info "正在从 '$CONFIG_FILE' 加载配置..."
+    # Source the config file. Ensure it only contains variable assignments for security.
+    # Consider more secure ways to read if config file content is not strictly controlled.
+    source "$CONFIG_FILE"
 
-    # ... (rest of validations for YOUR_DOMAIN, YOUR_ZONE_NAME, CF_API_TOKEN) ...
+    if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_DOMAIN'。"; exit 1
+    fi
+    if [[ -z "$YOUR_ZONE_NAME" || "$YOUR_ZONE_NAME" == "example.com" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_ZONE_NAME'。"; exit 1
+    fi
+    if [[ -z "$CF_API_TOKEN" || "$CF_API_TOKEN" == "your_cloudflare_api_token_here" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'CF_API_TOKEN'。"; exit 1
+    fi
+    log_success "配置加载成功。"
 }
 
 check_root() {
@@ -110,10 +113,16 @@ cf_api_call() {
     local response_body http_code temp_file
     temp_file=$(mktemp)
 
+    # Trim leading/trailing whitespace from API Token, just in case
+    local trimmed_cf_api_token=$(echo "$CF_API_TOKEN" | xargs)
+
+
     local curl_opts=(-s -w "%{http_code}" \
-        -H "Authorization: Bearer ${CF_API_TOKEN}" \
+        -H "Authorization: Bearer ${trimmed_cf_api_token}" \
         -H "Content-Type: application/json" \
         -o "$temp_file")
+
+    # log_info "DEBUG: CF_API_TOKEN used: Bearer ${trimmed_cf_api_token:0:5}...${trimmed_cf_api_token: -5}" # Debug token
 
     if [[ "$method" == "GET" || "$method" == "DELETE" ]]; then
         http_code=$(curl "${curl_opts[@]}" -X "$method" "${CLOUDFLARE_API_ENDPOINT}${path}")
@@ -134,6 +143,7 @@ cf_api_call() {
             errors="API响应非JSON或为空 (HTTP $http_code)"
         fi
         log_error "Cloudflare API 调用失败 ($http_code $method $path): $errors"
+        log_info "失败的API响应体 (部分): $(echo "$response_body" | head -c 200)" # Show partial body for debugging
         return 1
     fi
     echo "$response_body"
@@ -196,11 +206,34 @@ install_cloudflared() {
 configure_cloudflared_tunnel() {
     log_info "配置 Cloudflare Tunnel..."
     local SANITIZED_DOMAIN=$(echo "$DOMAIN" | tr '.' '-'); TUNNEL_NAME="sb-${SANITIZED_DOMAIN}-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 4)"
+
+    if [ -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then
+        log_warning "检测到现有的 Cloudflare 授权证书: ${CLOUDFLARED_CRED_DIR}/cert.pem"
+        local backup_cert="${CLOUDFLARED_CRED_DIR}/cert.pem.bak_$(date +%Y%m%d%H%M%S)"
+        mv "${CLOUDFLARED_CRED_DIR}/cert.pem" "$backup_cert"
+        log_info "已将现有证书备份到: $backup_cert"
+        log_info "现在将继续进行新的登录授权流程。"
+    fi
+
     log_warning "Cloudflare Tunnel 需要授权. 请复制显示的 URL 到本地浏览器并授权."
-    cloudflared tunnel login || { log_error "Cloudflare 登录失败."; exit 1; }
-    log_success "Cloudflare 登录授权似乎已完成."
-    if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then log_error "cert.pem 未在 ${CLOUDFLARED_CRED_DIR} 找到."; exit 1; fi
-    log_success "cert.pem 已在 ${CLOUDFLARED_CRED_DIR} 找到."
+    # cloudflared tunnel login outputs its own messages.
+    if ! cloudflared tunnel login; then
+        # Check again if cert.pem was created despite non-zero exit (unlikely for fatal errors)
+        if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then
+            log_error "Cloudflare 登录命令失败，并且未找到新的 cert.pem。"
+            exit 1
+        else
+            log_warning "Cloudflare 登录命令返回了错误，但 cert.pem 文件存在。谨慎继续..."
+        fi
+    fi
+
+    if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then
+        log_error "Cloudflare 登录授权未成功下载新的 cert.pem 到 ${CLOUDFLARED_CRED_DIR}。"
+        log_error "请检查 cloudflared tunnel login 的输出，并确保您在浏览器中完成了授权。"
+        exit 1
+    fi
+    log_success "Cloudflare 登录授权已完成，并已验证 cert.pem。"
+
     log_info "创建或查找 Tunnel: $TUNNEL_NAME"
     local TUNNEL_CREATE_OUTPUT=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)
     TUNNEL_ID=$(echo "$TUNNEL_CREATE_OUTPUT" | grep -oP 'created tunnel\s+\S+\s+with id\s+\K[0-9a-fA-F-]+')
@@ -209,7 +242,13 @@ configure_cloudflared_tunnel() {
         if [ -z "$TUNNEL_ID" ]; then log_error "创建或查找 Tunnel '$TUNNEL_NAME' 失败.\n$TUNNEL_CREATE_OUTPUT"; exit 1; fi
         log_info "找到已存在的 Tunnel '$TUNNEL_NAME' ID: $TUNNEL_ID"
     else log_success "Tunnel '$TUNNEL_NAME' (ID: $TUNNEL_ID) 创建成功."; fi
-    if [ ! -f "${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json" ]; then log_warning "Tunnel 特定凭证 ${TUNNEL_ID}.json 未找到."; fi
+
+    if [ ! -f "${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json" ]; then
+         log_warning "Tunnel 特定凭证 ${TUNNEL_ID}.json 未找到. 服务可能依赖全局 cert.pem."
+    else
+         log_success "找到 Tunnel 特定凭证 ${TUNNEL_ID}.json."
+    fi
+
 
     log_info "通过 API 管理 '$DOMAIN' 的 CNAME 记录..."
     local CF_ZONE_ID=$(get_zone_id) || { log_error "无法获取 Zone ID, 因此无法继续管理DNS. 请检查Cloudflare配置和API Token权限."; exit 1; }
@@ -315,15 +354,15 @@ generate_client_configs() {
     local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)"
     local ENCODED_WS_PATH=$(urlencode "${WS_PATH}"); local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
     local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
-    echo -e "---------------- VLESS 配置 ----------------" # To stdout for user
-    echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}" # To stdout
-    echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}" # To stdout
-    echo -e "${GREEN}QR Code:${NC}"; qrencode -t ANSIUTF8 "${VLESS_LINK}" # To stdout
-    echo -e "${BLUE}Sing-box JSON 片段:${NC}" # To stdout
+    echo -e "---------------- VLESS 配置 ----------------"
+    echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}"
+    echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}"
+    echo -e "${GREEN}QR Code:${NC}"; qrencode -t ANSIUTF8 "${VLESS_LINK}"
+    echo -e "${BLUE}Sing-box JSON 片段:${NC}"
     jq -n --arg tag "$REMARK_TAG" --arg server "$DOMAIN" --argjson port 443 --arg uuid "$VLESS_UUID" \
           --arg sni "$DOMAIN" --arg path "$WS_PATH" --arg host "$DOMAIN" \
-    '{type:"vless",tag:$tag,server:$server,server_port:$port,uuid:$uuid,tls:{enabled:true,server_name:$sni,insecure:false},transport:{type:"ws",path:$path,headers:{Host:$host}}}' # To stdout
-    echo -e "--------------------------------------------" # To stdout
+    '{type:"vless",tag:$tag,server:$server,server_port:$port,uuid:$uuid,tls:{enabled:true,server_name:$sni,insecure:false},transport:{type:"ws",path:$path,headers:{Host:$host}}}'
+    echo -e "--------------------------------------------"
 }
 
 urlencode() {
@@ -369,7 +408,7 @@ main() {
     install_cloudflared
     configure_cloudflared_tunnel
     setup_systemd_services
-    generate_client_configs # This function outputs client info to stdout
+    generate_client_configs
     save_installation_details
     log_success "所有操作已完成！"
     log_info "检查 ${CLOUDFLARED_CRED_DIR} 凭证和 Cloudflare Dashboard Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 状态。"

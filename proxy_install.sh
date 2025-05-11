@@ -2,80 +2,77 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Reads config from config.cfg, uses Cloudflare API for DNS, service file fix)
+# Author: AI Assistant (Consistent style, robust API calls, stderr logging)
 
 # --- Configuration File ---
 CONFIG_FILE_NAME="config.cfg"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}"
+CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}" # Assumes config.cfg is next to script
+                                                # If using bash <(curl...), change to PWD:
+                                                # CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
 
-#!/bin/bash
 
-# VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
-# Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Reads config from config.cfg in PWD, uses Cloudflare API for DNS, service file fix)
-
-# --- Configuration File ---
-CONFIG_FILE_NAME="config.cfg"
-# When run via bash <(curl ...), SCRIPT_DIR is not reliable for config file next to script.
-# Assume config.cfg is in the Present Working Directory (PWD) from where the command is run.
-CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
-
-# --- Load Configuration ---
-load_config() {
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件 '$CONFIG_FILE' (在当前工作目录) 未找到。"
-        log_error "请在您运行此命令的目录下创建 '$CONFIG_FILE_NAME' 并填入 YOUR_DOMAIN, YOUR_ZONE_NAME, 和 CF_API_TOKEN。"
-        # Create a template config file in the PWD if it doesn't exist
-        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $CONFIG_FILE${NC}"
-        cat > "$CONFIG_FILE" <<EOF
-# Cloudflare Deployment Configuration
-# 请填写您的域名、Cloudflare Zone 名称和 API Token
-
-# 您希望 Tunnel 绑定的完整域名 (例如: vless.example.com 或 example.com)
-YOUR_DOMAIN="your.example.com"
-
-# 您在 Cloudflare 中管理的 Zone 的确切名称 (通常是顶级域名，例如: example.com)
-# 根据您的截图，这里应该是 frankcn.dpdns.org
-YOUR_ZONE_NAME="your_zone_name.com"
-
-# 您的 Cloudflare API Token
-# 权限要求: Zone:DNS:Edit, Zone:Zone:Read
-# 前往 https://dash.cloudflare.com/profile/api-tokens 创建
-CF_API_TOKEN="your_cloudflare_api_token_here"
-EOF
-        chmod 600 "$CONFIG_FILE"
-        log_info "模板文件已创建于 '$CONFIG_FILE'。请编辑它并重新运行脚本。"
-        exit 1
-    fi
-
-    log_info "正在从 '$CONFIG_FILE' 加载配置..."
-    source "$CONFIG_FILE" # Source from PWD
-
-    # ... (rest of load_config remains the same) ...
-}
-# --- END OF CONFIGURATION LOADING ---
-
-# --- Global Variables (populated by config or later) ---
+# --- Global Variables ---
 VLESS_UUID=""
 SINGBOX_PORT=""
 WS_PATH=""
-DOMAIN="" # Will be set from YOUR_DOMAIN after loading config
-ZONE_NAME="" # Will be set from YOUR_ZONE_NAME
+DOMAIN=""           # Loaded from YOUR_DOMAIN in config
+ZONE_NAME=""        # Loaded from YOUR_ZONE_NAME in config
+CF_API_TOKEN=""     # Loaded from config
 TUNNEL_ID=""
 TUNNEL_NAME=""
 CLOUDFLARED_CRED_DIR="/root/.cloudflared"
 CLOUDFLARE_API_ENDPOINT="https://api.cloudflare.com/client/v4"
-# YOUR_DOMAIN, YOUR_ZONE_NAME and CF_API_TOKEN will be loaded from config.cfg
 
 # --- Colors ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
-# --- Helper Functions ---
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+# --- Helper Functions (Log to stderr) ---
+log_info() { echo -e "${BLUE}[INFO]${NC} $1" >&2; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1" >&2; }
+log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1" >&2; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
+
+
+# --- Load Configuration ---
+load_config() {
+    if [[ "$CONFIG_FILE" == "/dev/fd/${CONFIG_FILE_NAME}" || "$CONFIG_FILE" == "/proc/self/fd/${CONFIG_FILE_NAME}" ]]; then
+      # If script is piped from curl, PWD is more reliable for config file.
+      CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+      log_warning "脚本通过管道执行，尝试从当前工作目录加载配置文件: $CONFIG_FILE"
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_error "配置文件 '$CONFIG_FILE' 未找到。"
+        log_error "请创建 '$CONFIG_FILE_NAME' (在脚本目录或当前工作目录) 并填入所需变量。"
+        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $(pwd)/${CONFIG_FILE_NAME}${NC}" >&2
+        cat > "$(pwd)/${CONFIG_FILE_NAME}" <<EOF
+# Cloudflare Deployment Configuration
+YOUR_DOMAIN="your.example.com"
+YOUR_ZONE_NAME="example.com" # Your actual Zone name in Cloudflare
+CF_API_TOKEN="your_cloudflare_api_token_here"
+EOF
+        chmod 600 "$(pwd)/${CONFIG_FILE_NAME}"
+        log_info "模板文件已创建。请编辑它并重新运行脚本。" >&2
+        exit 1
+    fi
+
+    log_info "正在从 '$CONFIG_FILE' 加载配置..."
+    # Sanitize config file before sourcing (optional, for advanced security)
+    # For now, direct source assuming trusted config file
+    source "$CONFIG_FILE"
+
+    if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_DOMAIN'。"; exit 1
+    fi
+    if [[ -z "$YOUR_ZONE_NAME" || "$YOUR_ZONE_NAME" == "example.com" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_ZONE_NAME'。"; exit 1
+    fi
+    if [[ -z "$CF_API_TOKEN" || "$CF_API_TOKEN" == "your_cloudflare_api_token_here" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'CF_API_TOKEN'。"; exit 1
+    fi
+    log_success "配置加载成功。"
+}
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then log_error "此脚本需要 root 权限运行。"; exit 1; fi
@@ -84,9 +81,9 @@ check_root() {
 
 validate_and_set_configs() {
     DOMAIN="$YOUR_DOMAIN"
-    ZONE_NAME="$YOUR_ZONE_NAME" # Set ZONE_NAME from config
-    log_info "将使用域名: $DOMAIN (来自 $CONFIG_FILE_NAME)"
-    log_info "将在 Zone: $ZONE_NAME (来自 $CONFIG_FILE_NAME) 中操作 DNS"
+    ZONE_NAME="$YOUR_ZONE_NAME"
+    log_info "将使用域名: $DOMAIN"
+    log_info "将在 Zone: $ZONE_NAME 中操作 DNS"
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then log_error "域名 '$DOMAIN' 格式不正确。"; exit 1; fi
     if ! [[ "$ZONE_NAME" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then log_error "Zone 名称 '$ZONE_NAME' 格式不正确。"; exit 1; fi
 
@@ -135,13 +132,14 @@ cf_api_call() {
 
     if ! [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
         local errors
-        if echo "$response_body" | jq -e . >/dev/null 2>&1; then # Check if response_body is valid JSON
+        if echo "$response_body" | jq -e . >/dev/null 2>&1; then
             errors=$(echo "$response_body" | jq -r '.errors | map(.message) | join(", ") // "未知API错误 (响应非JSON或无错误信息)"')
         else
             errors="API响应非JSON或为空 (HTTP $http_code)"
         fi
         log_error "Cloudflare API 调用失败 ($http_code $method $path): $errors"
-        # log_info "失败的API响应体: $response_body" # For debugging
+        # For detailed debugging, uncomment next line:
+        # log_info "失败的API响应体: $response_body"
         return 1
     fi
     echo "$response_body" # This is the JSON response body to stdout
@@ -149,19 +147,19 @@ cf_api_call() {
 }
 
 get_zone_id() {
-    # Uses ZONE_NAME global variable, which is set from YOUR_ZONE_NAME in config
-    log_info "为配置的 Zone Name '$ZONE_NAME' 获取 Zone ID..."
+    log_info "为配置的 Zone Name '$ZONE_NAME' 获取 Zone ID..." # Log to stderr
     local response=$(cf_api_call "GET" "/zones?name=${ZONE_NAME}&status=active&match=all") || return 1
-    # Ensure we select the exact zone name match
     local zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$ZONE_NAME"'") | .id' | head -n1)
 
     if [[ -z "$zone_id" || "$zone_id" == "null" ]]; then
-        log_error "未能找到 Zone Name '$ZONE_NAME' 的 Zone ID。"
-        log_error "请确保 '$ZONE_NAME' 是您 Cloudflare 账户下的有效 Zone，并且 API Token 有权限访问。"
-        log_error "API 响应 (jq解析前): $response" # Show raw response for debugging
+        log_error "未能找到 Zone Name '$ZONE_NAME' 的 Zone ID。" # Log to stderr
+        log_error "请确保 '$ZONE_NAME' 是您 Cloudflare 账户下的有效 Zone，并且 API Token 有权限访问。" # Log to stderr
+        log_error "API 响应 (jq解析前): $response" # Log to stderr
         return 1
     fi
-    log_success "获取到 Zone ID: $zone_id for Zone Name: $ZONE_NAME"; echo "$zone_id"; return 0
+    log_success "获取到 Zone ID: $zone_id for Zone Name: $ZONE_NAME" # Log to stderr
+    echo "$zone_id" # THIS IS THE ONLY THING THAT GOES TO STDOUT
+    return 0
 }
 # --- End Cloudflare API Functions ---
 
@@ -205,12 +203,12 @@ configure_cloudflared_tunnel() {
     log_info "配置 Cloudflare Tunnel..."
     local SANITIZED_DOMAIN=$(echo "$DOMAIN" | tr '.' '-'); TUNNEL_NAME="sb-${SANITIZED_DOMAIN}-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 4)"
     log_warning "Cloudflare Tunnel 需要授权. 请复制显示的 URL 到本地浏览器并授权."
-    cloudflared tunnel login || { log_error "Cloudflare 登录失败."; exit 1; }
+    cloudflared tunnel login || { log_error "Cloudflare 登录失败."; exit 1; } # This will print URL to stdout/stderr
     log_success "Cloudflare 登录授权似乎已完成."
     if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then log_error "cert.pem 未在 ${CLOUDFLARED_CRED_DIR} 找到."; exit 1; fi
     log_success "cert.pem 已在 ${CLOUDFLARED_CRED_DIR} 找到."
     log_info "创建或查找 Tunnel: $TUNNEL_NAME"
-    local TUNNEL_CREATE_OUTPUT=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)
+    local TUNNEL_CREATE_OUTPUT=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1) # Capture stderr too
     TUNNEL_ID=$(echo "$TUNNEL_CREATE_OUTPUT" | grep -oP 'created tunnel\s+\S+\s+with id\s+\K[0-9a-fA-F-]+')
     if [ -z "$TUNNEL_ID" ]; then
         TUNNEL_ID=$(cloudflared tunnel list -o json | jq -r --arg name "$TUNNEL_NAME" '.[] | select(.name == $name) | .id' | head -n 1)
@@ -220,13 +218,17 @@ configure_cloudflared_tunnel() {
     if [ ! -f "${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json" ]; then log_warning "Tunnel 特定凭证 ${TUNNEL_ID}.json 未找到."; fi
 
     log_info "通过 API 管理 '$DOMAIN' 的 CNAME 记录..."
-    local CF_ZONE_ID=$(get_zone_id) || { log_error "无法获取 Zone ID, 无法继续."; exit 1; } # Use global ZONE_NAME
+    local CF_ZONE_ID=$(get_zone_id) || { log_error "无法获取 Zone ID, 因此无法继续管理DNS. 请检查Cloudflare配置和API Token权限."; exit 1; }
     local tunnel_cname_target="${TUNNEL_ID}.cfargotunnel.com"
     log_info "Tunnel CNAME 目标: $tunnel_cname_target"
     local existing_records_response=$(cf_api_call "GET" "/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${DOMAIN}")
     if [ $? -ne 0 ]; then
         log_warning "查询现有 DNS 记录失败. 尝试使用 'cloudflared tunnel route dns'..."
-        cloudflared tunnel route dns "$TUNNEL_ID" "$DOMAIN" || log_error "'cloudflared tunnel route dns' 也失败了."
+        if ! cloudflared tunnel route dns "$TUNNEL_ID" "$DOMAIN"; then
+             log_error "'cloudflared tunnel route dns' 也失败了. 请手动在 Cloudflare Dashboard 中为 ${DOMAIN} 创建 CNAME 指向 ${tunnel_cname_target}"
+        else
+             log_success "'cloudflared tunnel route dns' 执行成功 (请在Dashboard确认结果)."
+        fi
     else
         local record_id=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .id' | head -n 1)
         local current_content=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .content' | head -n 1)
@@ -294,17 +296,20 @@ User=root
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable sing-box cloudflared
-    log_info "启动服务..."; systemctl restart sing-box || { log_error "sing-box 启动失败. 查看: systemctl status sing-box.service 和 journalctl -u sing-box.service -e"; }
-    sleep 3; systemctl restart cloudflared || { log_error "cloudflared 启动失败. 查看: systemctl status cloudflared.service 和 journalctl -u cloudflared.service -e"; }
-    sleep 7; if ! systemctl is-active --quiet sing-box; then log_warning "sing-box 不活跃."; fi
-    if ! systemctl is-active --quiet cloudflared; then log_warning "cloudflared 不活跃."; fi
-    log_success "服务已启动 (或尝试启动)."
+    log_info "启动服务..."; 
+    if systemctl restart sing-box; then log_success "sing-box 服务已启动."; else log_error "sing-box 启动失败. 查看: systemctl status sing-box.service 和 journalctl -u sing-box.service -e"; fi
+    sleep 3; 
+    if systemctl restart cloudflared; then log_success "cloudflared 服务已启动."; else log_error "cloudflared 启动失败. 查看: systemctl status cloudflared.service 和 journalctl -u cloudflared.service -e"; fi
+    sleep 7; 
+    if ! systemctl is-active --quiet sing-box; then log_warning "sing-box 服务当前不活跃."; fi
+    if ! systemctl is-active --quiet cloudflared; then log_warning "cloudflared 服务当前不活跃."; fi
 }
 
 generate_client_configs() {
     local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)"
     local ENCODED_WS_PATH=$(urlencode "${WS_PATH}"); local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
     local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
+    # Output to stdout for user to copy, not stderr
     echo -e "---------------- VLESS 配置 ----------------"
     echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}"
     echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}"
@@ -330,7 +335,7 @@ save_installation_details() {
 
     printf "%s\n" "# Sing-box VLESS Cloudflare Tunnel Installation Details" > "$STATE_FILE"
     printf "DOMAIN=\"%s\"\n" "${DOMAIN}" >> "$STATE_FILE"
-    printf "ZONE_NAME=\"%s\"\n" "${ZONE_NAME}" >> "$STATE_FILE" # Save ZONE_NAME as well
+    printf "ZONE_NAME=\"%s\"\n" "${ZONE_NAME}" >> "$STATE_FILE"
     printf "VLESS_UUID=\"%s\"\n" "${VLESS_UUID}" >> "$STATE_FILE"
     printf "SINGBOX_PORT=\"%s\"\n" "${SINGBOX_PORT}" >> "$STATE_FILE"
     printf "WS_PATH=\"%s\"\n" "${WS_PATH}" >> "$STATE_FILE"
@@ -359,10 +364,13 @@ main() {
     install_cloudflared
     configure_cloudflared_tunnel
     setup_systemd_services
-    generate_client_configs
+    generate_client_configs # This function should output to stdout for user
     save_installation_details
     log_success "所有操作已完成！"
     log_info "检查 ${CLOUDFLARED_CRED_DIR} 凭证和 Cloudflare Dashboard Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 状态。"
 }
 
-main
+# Ensure script exits if any command fails (optional, but good for safety)
+# set -e
+
+main "$@" # Pass any arguments if needed, though this script doesn't use them

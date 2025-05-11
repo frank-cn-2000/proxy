@@ -2,7 +2,7 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Modified for direct script configuration, random internal params)
+# Author: AI Assistant (Modified for direct script configuration, random internal params, and uninstall support)
 
 # --- USER CONFIGURABLE VARIABLES ---
 # !!! 请在运行脚本前修改以下变量 !!!
@@ -62,23 +62,19 @@ validate_and_set_configs() {
     fi
     DOMAIN="$YOUR_DOMAIN"
 
-    # Basic validation for domain format
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
         log_error "配置的域名 '$DOMAIN' 格式不正确。"
         exit 1
     fi
     log_info "将使用域名: $DOMAIN"
 
-    # Generate VLESS UUID
     VLESS_UUID=$(uuidgen)
     log_info "随机生成的 VLESS UUID: $VLESS_UUID"
 
-    # Generate sing-box local port
     SINGBOX_PORT=$(shuf -i 10000-65535 -n 1)
     log_info "随机生成的 sing-box 本地端口: $SINGBOX_PORT"
 
-    # Generate WebSocket path
-    WS_PATH="/$(uuidgen | cut -d'-' -f1)-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)" # e.g., /xxxx-AbCdEfGh
+    WS_PATH="/$(uuidgen | cut -d'-' -f1)-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"
     log_info "随机生成的 WebSocket 路径: $WS_PATH"
 }
 
@@ -88,7 +84,7 @@ detect_arch() {
     case $ARCH in
         x86_64) ARCH_ALT="amd64" ;;
         aarch64) ARCH_ALT="arm64" ;;
-        armv7l) ARCH_ALT="armv7" ;; # Note: sing-box might not have armv7 precompiled for latest versions
+        armv7l) ARCH_ALT="armv7" ;;
         *)
             log_error "不支持的系统架构: $ARCH"
             exit 1
@@ -116,10 +112,11 @@ install_singbox() {
     if [ -z "$SINGBOX_VERSION_TAG" ] || [ "$SINGBOX_VERSION_TAG" == "null" ]; then
         log_error "无法获取最新的 sing-box 版本标签。"
         SINGBOX_VERSION="1.9.0" # Example fallback
-        log_warning "使用备用版本号: $SINGBOX_VERSION"
+        log_warning "使用备用版本号: $SINGBOX_VERSION (标签: v$SINGBOX_VERSION)"
+        SINGBOX_VERSION_TAG="v${SINGBOX_VERSION}" # Ensure tag has 'v'
     else
         SINGBOX_VERSION=$(echo "$SINGBOX_VERSION_TAG" | sed 's/v//')
-        log_info "获取到最新 sing-box 版本: $SINGBOX_VERSION (Tag: $SINGBOX_VERSION_TAG)"
+        log_info "获取到最新 sing-box 版本: $SINGBOX_VERSION (标签: $SINGBOX_VERSION_TAG)"
     fi
 
     DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION_TAG}/sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}.tar.gz"
@@ -127,8 +124,7 @@ install_singbox() {
     log_info "正在从 $DOWNLOAD_URL 下载 sing-box..."
     curl -Lo sing-box.tar.gz "$DOWNLOAD_URL"
     if [ $? -ne 0 ]; then
-        log_error "sing-box 下载失败。"
-        # Try an alternative download link if available for specific arch like armv7
+        log_error "sing-box 下载失败 (URL: $DOWNLOAD_URL)。"
         if [ "$ARCH_ALT" == "armv7" ]; then
             ALT_DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION_TAG}/sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}hf.tar.gz"
             log_info "尝试 armv7hf 下载链接: $ALT_DOWNLOAD_URL"
@@ -142,30 +138,33 @@ install_singbox() {
         fi
     fi
 
-    # Check if downloaded file is a valid tar.gz
     if ! tar -tzf sing-box.tar.gz > /dev/null 2>&1; then
         log_error "下载的 sing-box 文件不是有效的 tar.gz 压缩包。可能是下载链接有误或架构不支持。"
         rm -f sing-box.tar.gz
         exit 1
     fi
 
-    TARGET_DIR="sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}"
-    # Handle potential hf suffix for armv7
-    if [ "$ARCH_ALT" == "armv7" ] && ! tar -tzf sing-box.tar.gz | grep -q "${TARGET_DIR}/sing-box"; then
-        TARGET_DIR="sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}hf"
+    EXTRACT_DIR_NAME="sing-box-${SINGBOX_VERSION}-linux-${ARCH_ALT}"
+    # Check if extracted directory name might have 'hf' suffix for armv7
+    # List contents to find the actual directory name
+    ACTUAL_EXTRACT_DIR=$(tar -tzf sing-box.tar.gz | head -n1 | cut -f1 -d"/")
+    if [ -z "$ACTUAL_EXTRACT_DIR" ]; then
+        log_error "无法确定解压后的目录名。"
+        rm -f sing-box.tar.gz
+        exit 1
     fi
     
     tar -xzf sing-box.tar.gz
-    if [ ! -f "${TARGET_DIR}/sing-box" ]; then
-        log_error "解压后未找到 sing-box 可执行文件。目录结构可能已更改。"
-        ls -lah # list files for debugging
-        rm -rf sing-box.tar.gz "${TARGET_DIR}"
+    if [ ! -f "${ACTUAL_EXTRACT_DIR}/sing-box" ]; then
+        log_error "解压后未找到 sing-box 可执行文件于 '${ACTUAL_EXTRACT_DIR}/sing-box'。目录结构可能已更改。"
+        ls -lah 
+        rm -rf sing-box.tar.gz "${ACTUAL_EXTRACT_DIR}"
         exit 1
     fi
 
-    mv "${TARGET_DIR}/sing-box" /usr/local/bin/
+    mv "${ACTUAL_EXTRACT_DIR}/sing-box" /usr/local/bin/
     chmod +x /usr/local/bin/sing-box
-    rm -rf sing-box.tar.gz "${TARGET_DIR}/"
+    rm -rf sing-box.tar.gz "${ACTUAL_EXTRACT_DIR}/"
 
     mkdir -p /etc/sing-box/
     
@@ -230,7 +229,6 @@ install_cloudflared() {
 
 configure_cloudflared_tunnel() {
     log_info "配置 Cloudflare Tunnel..."
-    # Sanitize domain for tunnel name (replace dots with hyphens) and add a short random suffix
     SANITIZED_DOMAIN=$(echo "$DOMAIN" | tr '.' '-')
     TUNNEL_NAME="sb-${SANITIZED_DOMAIN}-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 4)"
 
@@ -238,30 +236,24 @@ configure_cloudflared_tunnel() {
     log_warning "请复制以下链接并在浏览器中打开进行授权。"
     cloudflared tunnel login
 
-    # Check if login was successful by listing tunnels
     if ! cloudflared tunnel list > /dev/null 2>&1; then
        log_warning "Cloudflare 登录可能未完成或检测失败。脚本将继续，但如果后续步骤失败，请手动执行 'cloudflared tunnel login' 并重新运行部分配置。"
     fi
     
-    log_info "已登录 (或假定已登录)。正在创建或查找 Tunnel: $TUNNEL_NAME"
+    log_info "正在创建或查找 Tunnel: $TUNNEL_NAME"
     
-    # Attempt to create the tunnel. If it already exists, cloudflared might error or inform.
-    # We'll try to get its ID anyway.
     TUNNEL_INFO_OUTPUT_FILE=$(mktemp)
     cloudflared tunnel create "$TUNNEL_NAME" > "$TUNNEL_INFO_OUTPUT_FILE" 2>&1
     TUNNEL_CREATE_OUTPUT=$(cat "$TUNNEL_INFO_OUTPUT_FILE")
     
-    # Try to parse ID from create output
     TUNNEL_ID=$(echo "$TUNNEL_CREATE_OUTPUT" | grep -oP 'created tunnel\s+\S+\s+with id\s+\K[0-9a-fA-F-]+')
 
     if [ -z "$TUNNEL_ID" ]; then
-        # If ID not found in create output, or create failed because it exists, list and find by name
         log_warning "无法从创建输出中直接获取 Tunnel ID，或 Tunnel '$TUNNEL_NAME' 可能已存在。尝试通过名称查找..."
         TUNNEL_ID=$(cloudflared tunnel list -o json | jq -r --arg name "$TUNNEL_NAME" '.[] | select(.name == $name) | .id' | head -n 1)
         if [ -z "$TUNNEL_ID" ]; then
             log_error "创建或查找 Tunnel '$TUNNEL_NAME' 失败。"
             log_error "Cloudflared 输出: \n$TUNNEL_CREATE_OUTPUT"
-            log_error "请检查您的 Cloudflare 账户和权限，或手动创建 Tunnel。"
             rm -f "$TUNNEL_INFO_OUTPUT_FILE"
             exit 1
         else
@@ -285,68 +277,27 @@ configure_cloudflared_tunnel() {
     DEFAULT_CRED_FILE="/root/.cloudflared/cert.pem"
 
     if [ ! -f "$CREDENTIALS_FILE_PATH" ] && [ ! -f "$DEFAULT_CRED_FILE" ]; then
-        log_error "Cloudflare Tunnel 凭证文件 ('${TUNNEL_ID}.json' 或 'cert.pem') 在 /root/.cloudflared/ 中未找到。"
-        log_error "这通常在 'cloudflared tunnel login' 之后生成。请确保登录成功。"
-        log_warning "Tunnel 服务可能无法启动。脚本将继续，但请检查此问题。"
-        # We will use TUNNEL_ID.json in config, cloudflared might still work if cert.pem is used globally for the account
+        log_warning "Cloudflare Tunnel 凭证文件 ('${TUNNEL_ID}.json' 或 'cert.pem') 在 /root/.cloudflared/ 中未找到。"
+        log_warning "请确保 'cloudflared tunnel login' 成功。Tunnel 服务可能无法启动。"
     fi
-
-    cat > /etc/cloudflared/config.yml <<EOF
-# tunnel: ${TUNNEL_ID} # Not needed if running 'cloudflared tunnel run <TUNNEL_ID_OR_NAME>'
-# credentials-file: ${CREDENTIALS_FILE_PATH} # Default location is usually fine
-
-# The primary way to run the tunnel:
-# cloudflared tunnel --config /etc/cloudflared/config.yml run ${TUNNEL_ID}
-# Or, if the tunnel ID is specified in this config.yml:
-# cloudflared tunnel --config /etc/cloudflared/config.yml run
-# The service file will use 'cloudflared tunnel run ${TUNNEL_ID}'
-
-# Configuration for the tunnel when run with 'cloudflared tunnel run <TUNNEL_ID_OR_NAME>'
-# or when 'tunnel: <ID>' is specified above.
-# This ingress section will be used by the named tunnel.
-
-url: http://127.0.0.1:${SINGBOX_PORT}
-# The following is an alternative way if you prefer to specify tunnel ID within the config file
-# tunnel: ${TUNNEL_ID}
-# credentials-file: ${CREDENTIALS_FILE_PATH}
-# ingress:
-#   - hostname: ${DOMAIN}
-#     service: http://127.0.0.1:${SINGBOX_PORT}
-#     originRequest:
-#       noTLSVerify: true
-#   - service: http_status:404
-EOF
-# Simpler config.yml:
-# The tunnel ID will be passed as an argument to `cloudflared tunnel run`.
-# The `ingress` rules in the config file are implicitly applied to the tunnel run this way
-# if no `tunnel:` key is present OR if rules are defined under a specific tunnel ID.
-# Let's use a more explicit config that works well when `cloudflared tunnel run <TUNNEL_ID>` is used.
 
     cat > /etc/cloudflared/config.yml <<EOF
 # This config file is used by 'cloudflared tunnel run <TUNNEL_ID_OR_NAME>'
 # The tunnel ID/name is specified on the command line.
 # Ingress rules defined here will apply to that tunnel.
-
-# If you want to run 'cloudflared tunnel run' without arguments, uncomment these:
-# tunnel: ${TUNNEL_ID}
-# credentials-file: /root/.cloudflared/${TUNNEL_ID}.json
-
 ingress:
   - hostname: ${DOMAIN}
     service: http://127.0.0.1:${SINGBOX_PORT}
     originRequest:
       noTLSVerify: true
-      # httpHostHeader: ${DOMAIN} # Usually not needed with WS path routing
   - service: http_status:404 # Catch-all for other requests
 EOF
-
     log_success "Cloudflared Tunnel 配置完成 (/etc/cloudflared/config.yml)。"
 }
 
 setup_systemd_services() {
     log_info "设置 systemd 服务..."
 
-    # sing-box service
     cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=sing-box service
@@ -367,9 +318,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-    # cloudflared service
-    # We will run cloudflared specifying the tunnel ID directly.
-    # The config.yml will provide the ingress rules.
     cat > /etc/systemd/system/cloudflared.service <<EOF
 [Unit]
 Description=Cloudflare Tunnel
@@ -391,36 +339,23 @@ EOF
     systemctl enable sing-box cloudflared
 
     log_info "正在启动 sing-box 服务..."
-    if systemctl restart sing-box; then
-        log_success "sing-box 服务已启动。"
-    else
-        log_error "sing-box 服务启动失败。请检查日志: journalctl -u sing-box -e"
-    fi
+    if systemctl restart sing-box; then log_success "sing-box 服务已启动。"; else log_error "sing-box 服务启动失败。 journalctl -u sing-box -e"; fi
     
     sleep 3 
 
     log_info "正在启动 Cloudflared 服务..."
-    if systemctl restart cloudflared; then
-        log_success "Cloudflared 服务已启动。"
-    else
-        log_error "Cloudflared 服务启动失败。请检查日志: journalctl -u cloudflared -e"
-    fi
+    if systemctl restart cloudflared; then log_success "Cloudflared 服务已启动。"; else log_error "Cloudflared 服务启动失败。 journalctl -u cloudflared -e"; fi
 
     log_info "等待服务稳定..."
     sleep 7 
 
-    if ! systemctl is-active --quiet sing-box; then
-        log_warning "sing-box 服务当前不活跃。请检查日志: journalctl -u sing-box -e"
-    fi
-    if ! systemctl is-active --quiet cloudflared; then
-        log_warning "Cloudflared 服务当前不活跃。请检查日志: journalctl -u cloudflared -e"
-    fi
+    if ! systemctl is-active --quiet sing-box; then log_warning "sing-box 服务当前不活跃。 journalctl -u sing-box -e"; fi
+    if ! systemctl is-active --quiet cloudflared; then log_warning "Cloudflared 服务当前不活跃。 journalctl -u cloudflared -e"; fi
 }
 
 generate_client_configs() {
     log_info "生成客户端配置信息..."
     REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)"
-    # URL encode path and remark for VLESS link
     ENCODED_WS_PATH=$(urlencode "${WS_PATH}")
     ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
     VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
@@ -436,12 +371,11 @@ generate_client_configs() {
     echo -e "${YELLOW}WebSocket Host (伪装域名):${NC} ${DOMAIN}"
     echo -e "${YELLOW}TLS/SSL:${NC} tls (由 Cloudflare 提供)"
     echo -e "${YELLOW}SNI (Server Name Indication):${NC} ${DOMAIN}"
-    echo -e "${YELLOW}跳过证书验证 (allowInsecure):${NC} false (Cloudflare证书是受信任的)"
     echo -e "--------------------------------------------------"
     echo -e "${GREEN}VLESS 链接:${NC}"
     echo -e "${VLESS_LINK}"
     echo -e "--------------------------------------------------"
-    echo -e "${GREEN}QR Code (请使用支持VLESS链接的客户端扫描):${NC}"
+    echo -e "${GREEN}QR Code:${NC}"
     qrencode -t ANSIUTF8 "${VLESS_LINK}"
     echo -e "--------------------------------------------------"
     echo -e "${BLUE}Sing-box 客户端配置片段 (JSON):${NC}"
@@ -454,34 +388,30 @@ generate_client_configs() {
   "uuid": "${VLESS_UUID}",
   "tls": {
     "enabled": true,
-    "server_name": "${DOMAIN}", // SNI
+    "server_name": "${DOMAIN}",
     "insecure": false 
   },
   "transport": {
     "type": "ws",
     "path": "${WS_PATH}",
     "headers": {
-      "Host": "${DOMAIN}" // WebSocket Host
+      "Host": "${DOMAIN}"
     }
   }
 }
 EOF
     echo -e "--------------------------------------------------"
-    log_info "如果 Cloudflared 服务无法连接到 Tunnel，请检查 '/root/.cloudflared/' 目录下的凭证文件。"
-    log_info "您可能需要在 Cloudflare Dashboard (Zero Trust -> Access -> Tunnels) 中检查 Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 的状态和 DNS 设置。"
 }
 
-# URL Encode function for VLESS link generation
 urlencode() {
     local string="${1}"
     local strlen=${#string}
     local encoded=""
     local pos c o
-
     for (( pos=0 ; pos<strlen ; pos++ )); do
         c=${string:$pos:1}
         case "$c" in
-            [-_.~a-zA-Z0-9/] ) o="${c}" ;; # Forward slash is generally safe in path part of URL
+            [-_.~a-zA-Z0-9/] ) o="${c}" ;;
             * ) printf -v o '%%%02x' "'$c"
         esac
         encoded+="${o}"
@@ -489,6 +419,34 @@ urlencode() {
     echo "${encoded}"
 }
 
+save_installation_details() {
+    log_info "正在保存安装详情以便卸载..."
+    STATE_FILE="/etc/sing-box/install_details.env"
+    mkdir -p "$(dirname "$STATE_FILE")" # Ensure directory exists
+    
+    # Backup existing state file if it exists
+    if [ -f "$STATE_FILE" ]; then
+        mv "$STATE_FILE" "${STATE_FILE}.bak_$(date +%Y%m%d%H%M%S)"
+        log_info "已备份旧的安装详情文件到: ${STATE_FILE}.bak_..."
+    fi
+
+    echo "# Sing-box VLESS Cloudflare Tunnel Installation Details" > "$STATE_FILE"
+    echo "DOMAIN=\"${DOMAIN}\"" >> "$STATE_FILE"
+    echo "VLESS_UUID=\"${VLESS_UUID}\"" >> "$STATE_FILE" # Added for potential verification during uninstall
+    echo "SINGBOX_PORT=\"${SINGBOX_PORT}\"" >> "$STATE_FILE"
+    echo "WS_PATH=\"${WS_PATH}\"" >> "$STATE_FILE"
+    echo "TUNNEL_ID=\"${TUNNEL_ID}\"" >> "$STATE_FILE"
+    echo "TUNNEL_NAME=\"${TUNNEL_NAME}\"" >> "$STATE_FILE"
+    echo "SINGBOX_SERVICE_FILE=\"/etc/systemd/system/sing-box.service\"" >> "$STATE_FILE"
+    echo "CLOUDFLARED_SERVICE_FILE=\"/etc/systemd/system/cloudflared.service\"" >> "$STATE_FILE"
+    echo "SINGBOX_CONFIG_DIR=\"/etc/sing-box\"" >> "$STATE_FILE"
+    echo "CLOUDFLARED_CONFIG_DIR=\"/etc/cloudflared\"" >> "$STATE_FILE"
+    echo "SINGBOX_EXECUTABLE=\"/usr/local/bin/sing-box\"" >> "$STATE_FILE"
+    echo "CLOUDFLARED_EXECUTABLE=\"/usr/local/bin/cloudflared\"" >> "$STATE_FILE"
+    echo "CLOUDFLARED_CREDENTIALS_DIR=\"/root/.cloudflared\"" >> "$STATE_FILE"
+    chmod 600 "$STATE_FILE" # Restrict permissions
+    log_success "安装详情已保存到: $STATE_FILE"
+}
 
 # --- Main Script ---
 main() {
@@ -498,11 +456,12 @@ main() {
     install_dependencies
     install_singbox
     install_cloudflared
-    configure_cloudflared_tunnel # This sets TUNNEL_ID and TUNNEL_NAME
+    configure_cloudflared_tunnel
     setup_systemd_services
     generate_client_configs
+    save_installation_details # Save details for uninstallation
     log_success "所有操作已完成！"
+    log_info "如果 Cloudflared 服务无法连接，请检查 '/root/.cloudflared/' 中的凭证，并在 Cloudflare Dashboard 检查 Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 的状态。"
 }
 
-# Execute main function
 main

@@ -2,14 +2,13 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Consistent style, robust API calls, stderr logging)
+# Author: AI Assistant (Reads config.cfg, uses Cloudflare API for DNS, CNAME proxied:true)
 
 # --- Configuration File ---
 CONFIG_FILE_NAME="config.cfg"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}" # Assumes config.cfg is next to script
-                                                # If using bash <(curl...), change to PWD:
-                                                # CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+# Determine script's own directory robustly
+SCRIPT_DIR_REAL=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+CONFIG_FILE="${SCRIPT_DIR_REAL}/${CONFIG_FILE_NAME}"
 
 
 # --- Global Variables ---
@@ -36,10 +35,10 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 # --- Load Configuration ---
 load_config() {
-    if [[ "$CONFIG_FILE" == "/dev/fd/${CONFIG_FILE_NAME}" || "$CONFIG_FILE" == "/proc/self/fd/${CONFIG_FILE_NAME}" ]]; then
-      # If script is piped from curl, PWD is more reliable for config file.
-      CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
-      log_warning "脚本通过管道执行，尝试从当前工作目录加载配置文件: $CONFIG_FILE"
+    # If SCRIPT_DIR_REAL is empty or points to /dev/fd (like from curl|bash), use PWD
+    if [[ -z "$SCRIPT_DIR_REAL" || "$SCRIPT_DIR_REAL" == "/dev/fd" || "$SCRIPT_DIR_REAL" == "/proc/self/fd" ]]; then
+        CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+        log_warning "脚本可能通过管道执行，尝试从当前工作目录加载配置文件: $CONFIG_FILE"
     fi
 
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -58,8 +57,6 @@ EOF
     fi
 
     log_info "正在从 '$CONFIG_FILE' 加载配置..."
-    # Sanitize config file before sourcing (optional, for advanced security)
-    # For now, direct source assuming trusted config file
     source "$CONFIG_FILE"
 
     if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
@@ -112,12 +109,12 @@ install_dependencies() {
 cf_api_call() {
     local method="$1" path="$2" data="$3"
     local response_body http_code temp_file
-    temp_file=$(mktemp) # Create a temporary file to store the response body
+    temp_file=$(mktemp)
 
     local curl_opts=(-s -w "%{http_code}" \
         -H "Authorization: Bearer ${CF_API_TOKEN}" \
         -H "Content-Type: application/json" \
-        -o "$temp_file") # Output body to temp file
+        -o "$temp_file")
 
     if [[ "$method" == "GET" || "$method" == "DELETE" ]]; then
         http_code=$(curl "${curl_opts[@]}" -X "$method" "${CLOUDFLARE_API_ENDPOINT}${path}")
@@ -138,27 +135,25 @@ cf_api_call() {
             errors="API响应非JSON或为空 (HTTP $http_code)"
         fi
         log_error "Cloudflare API 调用失败 ($http_code $method $path): $errors"
-        # For detailed debugging, uncomment next line:
-        # log_info "失败的API响应体: $response_body"
         return 1
     fi
-    echo "$response_body" # This is the JSON response body to stdout
+    echo "$response_body"
     return 0
 }
 
 get_zone_id() {
-    log_info "为配置的 Zone Name '$ZONE_NAME' 获取 Zone ID..." # Log to stderr
+    log_info "为配置的 Zone Name '$ZONE_NAME' 获取 Zone ID..."
     local response=$(cf_api_call "GET" "/zones?name=${ZONE_NAME}&status=active&match=all") || return 1
     local zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$ZONE_NAME"'") | .id' | head -n1)
 
     if [[ -z "$zone_id" || "$zone_id" == "null" ]]; then
-        log_error "未能找到 Zone Name '$ZONE_NAME' 的 Zone ID。" # Log to stderr
-        log_error "请确保 '$ZONE_NAME' 是您 Cloudflare 账户下的有效 Zone，并且 API Token 有权限访问。" # Log to stderr
-        log_error "API 响应 (jq解析前): $response" # Log to stderr
+        log_error "未能找到 Zone Name '$ZONE_NAME' 的 Zone ID。"
+        log_error "请确保 '$ZONE_NAME' 是您 Cloudflare 账户下的有效 Zone，并且 API Token 有权限访问。"
+        log_error "API 响应 (jq解析前): $response"
         return 1
     fi
-    log_success "获取到 Zone ID: $zone_id for Zone Name: $ZONE_NAME" # Log to stderr
-    echo "$zone_id" # THIS IS THE ONLY THING THAT GOES TO STDOUT
+    log_success "获取到 Zone ID: $zone_id for Zone Name: $ZONE_NAME"
+    echo "$zone_id"
     return 0
 }
 # --- End Cloudflare API Functions ---
@@ -203,12 +198,12 @@ configure_cloudflared_tunnel() {
     log_info "配置 Cloudflare Tunnel..."
     local SANITIZED_DOMAIN=$(echo "$DOMAIN" | tr '.' '-'); TUNNEL_NAME="sb-${SANITIZED_DOMAIN}-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 4)"
     log_warning "Cloudflare Tunnel 需要授权. 请复制显示的 URL 到本地浏览器并授权."
-    cloudflared tunnel login || { log_error "Cloudflare 登录失败."; exit 1; } # This will print URL to stdout/stderr
+    cloudflared tunnel login || { log_error "Cloudflare 登录失败."; exit 1; }
     log_success "Cloudflare 登录授权似乎已完成."
     if [ ! -f "${CLOUDFLARED_CRED_DIR}/cert.pem" ]; then log_error "cert.pem 未在 ${CLOUDFLARED_CRED_DIR} 找到."; exit 1; fi
     log_success "cert.pem 已在 ${CLOUDFLARED_CRED_DIR} 找到."
     log_info "创建或查找 Tunnel: $TUNNEL_NAME"
-    local TUNNEL_CREATE_OUTPUT=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1) # Capture stderr too
+    local TUNNEL_CREATE_OUTPUT=$(cloudflared tunnel create "$TUNNEL_NAME" 2>&1)
     TUNNEL_ID=$(echo "$TUNNEL_CREATE_OUTPUT" | grep -oP 'created tunnel\s+\S+\s+with id\s+\K[0-9a-fA-F-]+')
     if [ -z "$TUNNEL_ID" ]; then
         TUNNEL_ID=$(cloudflared tunnel list -o json | jq -r --arg name "$TUNNEL_NAME" '.[] | select(.name == $name) | .id' | head -n 1)
@@ -225,27 +220,39 @@ configure_cloudflared_tunnel() {
     if [ $? -ne 0 ]; then
         log_warning "查询现有 DNS 记录失败. 尝试使用 'cloudflared tunnel route dns'..."
         if ! cloudflared tunnel route dns "$TUNNEL_ID" "$DOMAIN"; then
-             log_error "'cloudflared tunnel route dns' 也失败了. 请手动在 Cloudflare Dashboard 中为 ${DOMAIN} 创建 CNAME 指向 ${tunnel_cname_target}"
+             log_error "'cloudflared tunnel route dns' 也失败了. 请手动在 Cloudflare Dashboard 中为 ${DOMAIN} 创建 CNAME (代理状态开启) 指向 ${tunnel_cname_target}"
         else
-             log_success "'cloudflared tunnel route dns' 执行成功 (请在Dashboard确认结果)."
+             log_success "'cloudflared tunnel route dns' 执行成功 (请在Dashboard确认代理状态开启)."
         fi
     else
         local record_id=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .id' | head -n 1)
         local current_content=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .content' | head -n 1)
+        local current_proxied_status=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .proxied' | head -n 1)
+
         if [[ -n "$record_id" && "$record_id" != "null" ]]; then
-            if [[ "$current_content" == "$tunnel_cname_target" ]]; then log_success "CNAME 记录已是最新."; else
-                log_info "更新现有 CNAME (ID: $record_id)..."
-                local update_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied false --argjson ttl 1 \
+            if [[ "$current_content" == "$tunnel_cname_target" && "$current_proxied_status" == "true" ]]; then
+                log_success "CNAME 记录已是最新且代理状态正确."
+            else
+                log_info "CNAME 记录需要更新 (ID: $record_id, 当前内容: $current_content, 当前代理: $current_proxied_status)..."
+                local update_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied true --argjson ttl 1 \
                 '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: $ttl}')
                 local update_response=$(cf_api_call "PUT" "/zones/${CF_ZONE_ID}/dns_records/${record_id}" "$update_data")
-                if [ $? -eq 0 ] && echo "$update_response" | jq -e '.success == true' > /dev/null; then log_success "CNAME 更新成功."; else log_error "CNAME 更新失败."; fi
+                if [ $? -eq 0 ] && echo "$update_response" | jq -e '.success == true' > /dev/null; then
+                    log_success "CNAME 更新成功 (代理状态已开启)."
+                else
+                    log_error "CNAME 更新失败."
+                fi
             fi
         else
-            log_info "创建新的 CNAME 记录..."
-            local create_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied false --argjson ttl 1 \
+            log_info "创建新的 CNAME 记录 (代理状态开启)..."
+            local create_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied true --argjson ttl 1 \
             '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: $ttl}')
             local create_response=$(cf_api_call "POST" "/zones/${CF_ZONE_ID}/dns_records" "$create_data")
-            if [ $? -eq 0 ] && echo "$create_response" | jq -e '.success == true' > /dev/null; then log_success "CNAME 创建成功."; else log_error "CNAME 创建失败."; fi
+            if [ $? -eq 0 ] && echo "$create_response" | jq -e '.success == true' > /dev/null; then
+                log_success "CNAME 创建成功 (代理状态已开启)."
+            else
+                log_error "CNAME 创建失败."
+            fi
         fi
     fi
     mkdir -p /etc/cloudflared/; cat > /etc/cloudflared/config.yml <<EOF
@@ -256,7 +263,7 @@ ingress:
   - service: http_status:404
 EOF
     log_success "Cloudflared Tunnel 配置完成 (/etc/cloudflared/config.yml)."
-    log_warning "请验证 Cloudflare DNS 中的 CNAME 记录 (${DOMAIN}) 是否正确指向: ${tunnel_cname_target}"
+    log_warning "请验证 Cloudflare DNS 中的 CNAME 记录 (${DOMAIN}) 是否正确指向: ${tunnel_cname_target} 并且代理状态已开启 (橙色云彩)."
 }
 
 setup_systemd_services() {
@@ -296,11 +303,11 @@ User=root
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable sing-box cloudflared
-    log_info "启动服务..."; 
+    log_info "启动服务...";
     if systemctl restart sing-box; then log_success "sing-box 服务已启动."; else log_error "sing-box 启动失败. 查看: systemctl status sing-box.service 和 journalctl -u sing-box.service -e"; fi
-    sleep 3; 
+    sleep 3;
     if systemctl restart cloudflared; then log_success "cloudflared 服务已启动."; else log_error "cloudflared 启动失败. 查看: systemctl status cloudflared.service 和 journalctl -u cloudflared.service -e"; fi
-    sleep 7; 
+    sleep 7;
     if ! systemctl is-active --quiet sing-box; then log_warning "sing-box 服务当前不活跃."; fi
     if ! systemctl is-active --quiet cloudflared; then log_warning "cloudflared 服务当前不活跃."; fi
 }
@@ -309,16 +316,15 @@ generate_client_configs() {
     local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)"
     local ENCODED_WS_PATH=$(urlencode "${WS_PATH}"); local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
     local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${DOMAIN}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
-    # Output to stdout for user to copy, not stderr
-    echo -e "---------------- VLESS 配置 ----------------"
-    echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}"
-    echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}"
-    echo -e "${GREEN}QR Code:${NC}"; qrencode -t ANSIUTF8 "${VLESS_LINK}"
-    echo -e "${BLUE}Sing-box JSON 片段:${NC}"
+    echo -e "---------------- VLESS 配置 ----------------" # To stdout for user
+    echo -e "${YELLOW}域名:${NC} ${DOMAIN}\n${YELLOW}端口:${NC} 443\n${YELLOW}UUID:${NC} ${VLESS_UUID}\n${YELLOW}路径:${NC} ${WS_PATH}\n${YELLOW}Host:${NC} ${DOMAIN}" # To stdout
+    echo -e "${GREEN}VLESS 链接:${NC}\n${VLESS_LINK}" # To stdout
+    echo -e "${GREEN}QR Code:${NC}"; qrencode -t ANSIUTF8 "${VLESS_LINK}" # To stdout
+    echo -e "${BLUE}Sing-box JSON 片段:${NC}" # To stdout
     jq -n --arg tag "$REMARK_TAG" --arg server "$DOMAIN" --argjson port 443 --arg uuid "$VLESS_UUID" \
           --arg sni "$DOMAIN" --arg path "$WS_PATH" --arg host "$DOMAIN" \
-    '{type:"vless",tag:$tag,server:$server,server_port:$port,uuid:$uuid,tls:{enabled:true,server_name:$sni,insecure:false},transport:{type:"ws",path:$path,headers:{Host:$host}}}'
-    echo -e "--------------------------------------------"
+    '{type:"vless",tag:$tag,server:$server,server_port:$port,uuid:$uuid,tls:{enabled:true,server_name:$sni,insecure:false},transport:{type:"ws",path:$path,headers:{Host:$host}}}' # To stdout
+    echo -e "--------------------------------------------" # To stdout
 }
 
 urlencode() {
@@ -364,13 +370,12 @@ main() {
     install_cloudflared
     configure_cloudflared_tunnel
     setup_systemd_services
-    generate_client_configs # This function should output to stdout for user
+    generate_client_configs # This function outputs client info to stdout
     save_installation_details
     log_success "所有操作已完成！"
     log_info "检查 ${CLOUDFLARED_CRED_DIR} 凭证和 Cloudflare Dashboard Tunnel '${TUNNEL_NAME}' (ID: ${TUNNEL_ID}) 状态。"
 }
 
-# Ensure script exits if any command fails (optional, but good for safety)
-# set -e
+# set -e # Uncomment for stricter error checking if desired
 
-main "$@" # Pass any arguments if needed, though this script doesn't use them
+main "$@"

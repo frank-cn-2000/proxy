@@ -2,25 +2,29 @@
 
 # VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
 # Fully compatible with Ubuntu 24.04 LTS
-# Author: AI Assistant (Reads config from config.cfg, uses Cloudflare API for DNS, syntax fix)
+# Author: AI Assistant (Reads config from config.cfg, uses Cloudflare API for DNS, service file fix)
 
 # --- Configuration File ---
 CONFIG_FILE_NAME="config.cfg"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)" # Gets directory of the script itself
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}"
 
 # --- Load Configuration ---
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         log_error "配置文件 '$CONFIG_FILE' 未找到。"
-        log_error "请在脚本所在目录创建 '$CONFIG_FILE_NAME' 并填入 YOUR_DOMAIN 和 CF_API_TOKEN。"
+        log_error "请在脚本所在目录创建 '$CONFIG_FILE_NAME' 并填入 YOUR_DOMAIN, YOUR_ZONE_NAME, 和 CF_API_TOKEN。"
         echo -e "${YELLOW}正在创建模板配置文件: $CONFIG_FILE${NC}"
         cat > "$CONFIG_FILE" <<EOF
 # Cloudflare Deployment Configuration
-# 请填写您的域名和 Cloudflare API Token
+# 请填写您的域名、Cloudflare Zone 名称和 API Token
 
-# 您的域名，例如：vless.yourdomain.com
+# 您希望 Tunnel 绑定的完整域名 (例如: vless.example.com 或 example.com)
 YOUR_DOMAIN="your.example.com"
+
+# 您在 Cloudflare 中管理的 Zone 的确切名称 (通常是顶级域名，例如: example.com)
+# 根据您的截图，这里应该是 frankcn.dpdns.org
+YOUR_ZONE_NAME="your_zone_name.com"
 
 # 您的 Cloudflare API Token
 # 权限要求: Zone:DNS:Edit, Zone:Zone:Read
@@ -33,12 +37,14 @@ EOF
     fi
 
     log_info "正在从 '$CONFIG_FILE' 加载配置..."
-    # Source the config file to load variables.
-    # Ensure config.cfg is trusted and contains only variable assignments.
     source "$CONFIG_FILE"
 
     if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
         log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_DOMAIN'。"
+        exit 1
+    fi
+    if [[ -z "$YOUR_ZONE_NAME" || "$YOUR_ZONE_NAME" == "your_zone_name.com" ]]; then
+        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_ZONE_NAME'。"
         exit 1
     fi
     if [[ -z "$CF_API_TOKEN" || "$CF_API_TOKEN" == "your_cloudflare_api_token_here" ]]; then
@@ -55,11 +61,12 @@ VLESS_UUID=""
 SINGBOX_PORT=""
 WS_PATH=""
 DOMAIN="" # Will be set from YOUR_DOMAIN after loading config
+ZONE_NAME="" # Will be set from YOUR_ZONE_NAME
 TUNNEL_ID=""
 TUNNEL_NAME=""
 CLOUDFLARED_CRED_DIR="/root/.cloudflared"
 CLOUDFLARE_API_ENDPOINT="https://api.cloudflare.com/client/v4"
-# YOUR_DOMAIN and CF_API_TOKEN will be loaded from config.cfg
+# YOUR_DOMAIN, YOUR_ZONE_NAME and CF_API_TOKEN will be loaded from config.cfg
 
 # --- Colors ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -76,9 +83,13 @@ check_root() {
 }
 
 validate_and_set_configs() {
-    DOMAIN="$YOUR_DOMAIN" # Set from global YOUR_DOMAIN loaded from config
+    DOMAIN="$YOUR_DOMAIN"
+    ZONE_NAME="$YOUR_ZONE_NAME" # Set ZONE_NAME from config
     log_info "将使用域名: $DOMAIN (来自 $CONFIG_FILE_NAME)"
+    log_info "将在 Zone: $ZONE_NAME (来自 $CONFIG_FILE_NAME) 中操作 DNS"
     if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then log_error "域名 '$DOMAIN' 格式不正确。"; exit 1; fi
+    if ! [[ "$ZONE_NAME" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then log_error "Zone 名称 '$ZONE_NAME' 格式不正确。"; exit 1; fi
+
     VLESS_UUID=$(uuidgen); log_info "VLESS UUID: $VLESS_UUID"
     SINGBOX_PORT=$(shuf -i 10000-65535 -n 1); log_info "Sing-box 本地端口: $SINGBOX_PORT"
     WS_PATH="/$(uuidgen | cut -d'-' -f1)-$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 8)"; log_info "WebSocket 路径: $WS_PATH"
@@ -102,72 +113,53 @@ install_dependencies() {
 
 # --- Cloudflare API Functions ---
 cf_api_call() {
-    local method="$1" path="$2" data="$3" response_body http_code
-    local curl_opts=(-s -w "%{http_code}" \
+    local method="$1" path="$2" data="$3"
+    local response_output response_body http_code
+    local curl_opts=(-s -w "\n%{http_code}" \
         -H "Authorization: Bearer ${CF_API_TOKEN}" \
         -H "Content-Type: application/json")
 
-    # Capture stderr (which includes http_code) and stdout (response body) separately
-    # Use process substitution for response_body and capture http_code from stderr
-    # This is a common pattern to get both.
-    exec 3>&1 # Save original stdout
-    response_body_with_code=$(curl "${curl_opts[@]}" -X "$method" \
-        ${data:+"--data"} ${data:+"$data"} \
-        "${CLOUDFLARE_API_ENDPOINT}${path}" \
-        -o >(cat >&3) # Send actual body to original stdout (now fd 3) then to variable
-    )
-    exec 3>&- # Close fd 3
+    if [[ "$method" == "GET" || "$method" == "DELETE" ]]; then
+        response_output=$(curl "${curl_opts[@]}" -X "$method" "${CLOUDFLARE_API_ENDPOINT}${path}")
+    elif [[ "$method" == "POST" || "$method" == "PUT" ]]; then
+        response_output=$(curl "${curl_opts[@]}" -X "$method" --data "$data" "${CLOUDFLARE_API_ENDPOINT}${path}")
+    else
+        log_error "不支持的 HTTP 方法: $method"; return 1
+    fi
 
-    http_code=$(echo "$response_body_with_code" | tail -n1)
-    response_body=$(echo "$response_body_with_code" | sed '$d')
+    http_code=$(echo "$response_output" | tail -n1)
+    response_body=$(echo "$response_output" | sed '$d')
 
-
-    if ! [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then # Check if HTTP status is 2xx
+    if ! [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
         local errors
-        if echo "$response_body" | jq -e . >/dev/null 2>&1; then # Check if response_body is valid JSON
+        if echo "$response_body" | jq -e . >/dev/null 2>&1; then
             errors=$(echo "$response_body" | jq -r '.errors | map(.message) | join(", ") // "未知API错误 (响应非JSON或无错误信息)"')
         else
-            errors="API响应非JSON或为空: $response_body"
+            errors="API响应非JSON或为空 (HTTP $http_code)" # Removed $response_body from here to avoid overly long error messages in common cases
         fi
         log_error "Cloudflare API 调用失败 ($http_code $method $path): $errors"
+        # For detailed debugging, uncomment next line:
+        # log_info "失败的API响应体: $response_body"
         return 1
     fi
-    echo "$response_body" # Return the body (which is now on stdout)
+    echo "$response_body"
     return 0
 }
 
 get_zone_id() {
-    local domain_name="$1" base_domain response zone_id
-    # Improved base_domain extraction for common TLDs
-    base_domain=$(echo "$domain_name" | rev | cut -d . -f 1,2 | rev)
-    if [[ $(echo "$base_domain" | tr '.' '\n' | wc -l) -lt 2 ]]; then # if it's like "localhost" or single name
-        base_domain="$domain_name" # use the original
-    fi
-    # Further refinement for TLDs like co.uk, com.au etc.
-    if [[ "$base_domain" =~ \.(com|co|org|net|gov|edu|ac)\.[a-z]{2}$ || "$base_domain" =~ \.[a-z]{2,3}\.[a-z]{2}$ ]]; then # e.g. co.uk, com.au
-         base_domain=$(echo "$domain_name" | rev | cut -d . -f 1,2,3 | rev)
-    fi
-
-    log_info "为基础域名 '$base_domain' (从 '$domain_name' 推断) 获取 Zone ID..."
-    response=$(cf_api_call "GET" "/zones?name=${base_domain}&status=active&match=all") || return 1
-    zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$base_domain"'") | .id' | head -n1) # More specific match
-    
-    if [[ -z "$zone_id" || "$zone_id" == "null" ]]; then
-        # Fallback: try with one less part if the initial base_domain was too specific (e.g. for sub.sub.example.com)
-        base_domain_fallback=$(echo "$domain_name" | awk -F. '{print $(NF-1)"."$NF}')
-        if [[ "$base_domain_fallback" != "$base_domain" ]]; then
-            log_info "尝试备选基础域名 '$base_domain_fallback' 获取 Zone ID..."
-            response=$(cf_api_call "GET" "/zones?name=${base_domain_fallback}&status=active&match=all") || return 1
-            zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$base_domain_fallback"'") | .id' | head -n1)
-        fi
-    fi
+    # Uses ZONE_NAME global variable, which is set from YOUR_ZONE_NAME in config
+    log_info "为配置的 Zone Name '$ZONE_NAME' 获取 Zone ID..."
+    local response=$(cf_api_call "GET" "/zones?name=${ZONE_NAME}&status=active&match=all") || return 1
+    # Ensure we select the exact zone name match
+    local zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$ZONE_NAME"'") | .id' | head -n1)
 
     if [[ -z "$zone_id" || "$zone_id" == "null" ]]; then
-        log_error "未能找到域名 '$domain_name' (或其基础域名 '$base_domain'/'$base_domain_fallback') 的 Zone ID。"
-        log_error "API 响应: $response"
+        log_error "未能找到 Zone Name '$ZONE_NAME' 的 Zone ID。"
+        log_error "请确保 '$ZONE_NAME' 是您 Cloudflare 账户下的有效 Zone，并且 API Token 有权限访问。"
+        log_error "API 响应 (jq解析前): $response" # Show raw response for debugging
         return 1
     fi
-    log_success "获取到 Zone ID: $zone_id for $base_domain (或其变体)"; echo "$zone_id"; return 0
+    log_success "获取到 Zone ID: $zone_id for Zone Name: $ZONE_NAME"; echo "$zone_id"; return 0
 }
 # --- End Cloudflare API Functions ---
 
@@ -226,10 +218,10 @@ configure_cloudflared_tunnel() {
     if [ ! -f "${CLOUDFLARED_CRED_DIR}/${TUNNEL_ID}.json" ]; then log_warning "Tunnel 特定凭证 ${TUNNEL_ID}.json 未找到."; fi
 
     log_info "通过 API 管理 '$DOMAIN' 的 CNAME 记录..."
-    local ZONE_ID=$(get_zone_id "$DOMAIN") || { log_error "无法获取 Zone ID, 无法继续."; exit 1; }
+    local CF_ZONE_ID=$(get_zone_id) || { log_error "无法获取 Zone ID, 无法继续."; exit 1; } # Use global ZONE_NAME
     local tunnel_cname_target="${TUNNEL_ID}.cfargotunnel.com"
     log_info "Tunnel CNAME 目标: $tunnel_cname_target"
-    local existing_records_response=$(cf_api_call "GET" "/zones/${ZONE_ID}/dns_records?type=CNAME&name=${DOMAIN}")
+    local existing_records_response=$(cf_api_call "GET" "/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${DOMAIN}")
     if [ $? -ne 0 ]; then
         log_warning "查询现有 DNS 记录失败. 尝试使用 'cloudflared tunnel route dns'..."
         cloudflared tunnel route dns "$TUNNEL_ID" "$DOMAIN" || log_error "'cloudflared tunnel route dns' 也失败了."
@@ -241,14 +233,14 @@ configure_cloudflared_tunnel() {
                 log_info "更新现有 CNAME (ID: $record_id)..."
                 local update_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied false --argjson ttl 1 \
                 '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: $ttl}')
-                local update_response=$(cf_api_call "PUT" "/zones/${ZONE_ID}/dns_records/${record_id}" "$update_data")
+                local update_response=$(cf_api_call "PUT" "/zones/${CF_ZONE_ID}/dns_records/${record_id}" "$update_data")
                 if [ $? -eq 0 ] && echo "$update_response" | jq -e '.success == true' > /dev/null; then log_success "CNAME 更新成功."; else log_error "CNAME 更新失败."; fi
             fi
         else
             log_info "创建新的 CNAME 记录..."
             local create_data=$(jq -n --arg type "CNAME" --arg name "$DOMAIN" --arg content "$tunnel_cname_target" --argjson proxied false --argjson ttl 1 \
             '{type: $type, name: $name, content: $content, proxied: $proxied, ttl: $ttl}')
-            local create_response=$(cf_api_call "POST" "/zones/${ZONE_ID}/dns_records" "$create_data")
+            local create_response=$(cf_api_call "POST" "/zones/${CF_ZONE_ID}/dns_records" "$create_data")
             if [ $? -eq 0 ] && echo "$create_response" | jq -e '.success == true' > /dev/null; then log_success "CNAME 创建成功."; else log_error "CNAME 创建失败."; fi
         fi
     fi
@@ -269,12 +261,17 @@ setup_systemd_services() {
 [Unit]
 Description=sing-box service
 After=network.target nss-lookup.target
+
 [Service]
-User=root; WorkingDirectory=/etc/sing-box
+User=root
+WorkingDirectory=/etc/sing-box
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure; RestartSec=10; LimitNOFILE=infinity
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -282,16 +279,21 @@ EOF
 [Unit]
 Description=Cloudflare Tunnel
 After=network.target
+
 [Service]
-TimeoutStartSec=0; Type=notify
+TimeoutStartSec=0
+Type=notify
 ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --config /etc/cloudflared/config.yml run ${TUNNEL_ID}
-Restart=on-failure; RestartSec=5s; User=root
+Restart=on-failure
+RestartSec=5s
+User=root
+
 [Install]
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable sing-box cloudflared
-    log_info "启动服务..."; systemctl restart sing-box || log_error "sing-box 启动失败."
-    sleep 3; systemctl restart cloudflared || log_error "cloudflared 启动失败."
+    log_info "启动服务..."; systemctl restart sing-box || { log_error "sing-box 启动失败. 查看: systemctl status sing-box.service 和 journalctl -u sing-box.service -e"; }
+    sleep 3; systemctl restart cloudflared || { log_error "cloudflared 启动失败. 查看: systemctl status cloudflared.service 和 journalctl -u cloudflared.service -e"; }
     sleep 7; if ! systemctl is-active --quiet sing-box; then log_warning "sing-box 不活跃."; fi
     if ! systemctl is-active --quiet cloudflared; then log_warning "cloudflared 不活跃."; fi
     log_success "服务已启动 (或尝试启动)."
@@ -315,7 +317,6 @@ generate_client_configs() {
 urlencode() {
     local string="${1}" encoded="" pos c o; local strlen=${#string}
     for (( pos=0 ; pos<strlen ; pos++ )); do c=${string:$pos:1}
-        # Removed ! ~ * ' ( ) from "safe" list as they might cause issues in some contexts if not encoded for URLs
         case "$c" in [-_.a-zA-Z0-9/] ) o="${c}" ;; * ) printf -v o '%%%02x' "'$c"; esac
         encoded+="${o}"; done; echo "${encoded}"
 }
@@ -325,9 +326,9 @@ save_installation_details() {
     local STATE_FILE="/etc/sing-box/install_details.env"; mkdir -p "$(dirname "$STATE_FILE")"
     if [ -f "$STATE_FILE" ]; then mv "$STATE_FILE" "${STATE_FILE}.bak_$(date +%Y%m%d%H%M%S)"; fi
 
-    # Using printf for robustness
     printf "%s\n" "# Sing-box VLESS Cloudflare Tunnel Installation Details" > "$STATE_FILE"
     printf "DOMAIN=\"%s\"\n" "${DOMAIN}" >> "$STATE_FILE"
+    printf "ZONE_NAME=\"%s\"\n" "${ZONE_NAME}" >> "$STATE_FILE" # Save ZONE_NAME as well
     printf "VLESS_UUID=\"%s\"\n" "${VLESS_UUID}" >> "$STATE_FILE"
     printf "SINGBOX_PORT=\"%s\"\n" "${SINGBOX_PORT}" >> "$STATE_FILE"
     printf "WS_PATH=\"%s\"\n" "${WS_PATH}" >> "$STATE_FILE"
@@ -340,8 +341,6 @@ save_installation_details() {
     printf "SINGBOX_EXECUTABLE=\"%s\"\n" "/usr/local/bin/sing-box" >> "$STATE_FILE"
     printf "CLOUDFLARED_EXECUTABLE=\"%s\"\n" "/usr/local/bin/cloudflared" >> "$STATE_FILE"
     printf "CLOUDFLARED_CRED_DIR=\"%s\"\n" "${CLOUDFLARED_CRED_DIR}" >> "$STATE_FILE"
-    # Consider if CF_API_TOKEN should be saved here. For security, it's better not to.
-    # The uninstall script can re-read it from config.cfg.
 
     chmod 600 "$STATE_FILE"
     log_success "安装详情已保存到: $STATE_FILE"

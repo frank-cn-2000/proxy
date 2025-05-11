@@ -32,7 +32,7 @@ else
   exit 1
 fi
 
-# === 依赖 ===
+# === 安装依赖 ===
 REQUIRED_CMDS=("curl" "unzip" "socat" "jq" "cron" "qrencode" "uuidgen")
 MISSING_CMDS=()
 for cmd in "${REQUIRED_CMDS[@]}"; do
@@ -48,7 +48,7 @@ else
   echo "✅ 所有依赖已满足"
 fi
 
-# === 安装 cloudflared ===
+# === 安装 cloudflared（二进制） ===
 if ! command -v cloudflared &>/dev/null; then
   echo "📦 安装 cloudflared..."
   ARCH=$(uname -m)
@@ -143,7 +143,7 @@ systemctl daemon-reload
 systemctl enable sing-box
 systemctl restart sing-box
 
-# === Cloudflare Tunnel ===
+# === 创建 Cloudflare Tunnel ===
 cloudflared login || true
 cloudflared tunnel delete "$TUNNEL_NAME" || true
 rm -f "$HOME/.cloudflared/$TUNNEL_NAME.json"
@@ -163,7 +163,11 @@ EOF
 
 cloudflared tunnel route dns "$TUNNEL_NAME" "$DOMAIN"
 
-cat > /etc/systemd/system/cloudflared@$TUNNEL_NAME.service <<EOF
+# === 创建 cloudflared@<TUNNEL_NAME>.service（如不存在） ===
+SERVICE_PATH="/etc/systemd/system/cloudflared@${TUNNEL_NAME}.service"
+if [ ! -f "$SERVICE_PATH" ]; then
+  echo "🛠️ 正在创建 systemd 服务：cloudflared@${TUNNEL_NAME}.service"
+  cat > "$SERVICE_PATH" <<EOF
 [Unit]
 Description=Cloudflared Tunnel %i
 After=network.target
@@ -177,12 +181,14 @@ User=$(whoami)
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec
-systemctl daemon-reload
+  systemctl daemon-reexec
+  systemctl daemon-reload
+fi
+
 systemctl enable cloudflared@"$TUNNEL_NAME"
 systemctl restart cloudflared@"$TUNNEL_NAME"
 
-# === 展示导入链接 ===
+# === 展示导入链接和二维码 ===
 LINK="vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&host=$DOMAIN&path=$WS_PATH#VLESS-CFTunnel"
 
 echo

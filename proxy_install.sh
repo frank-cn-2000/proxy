@@ -47,6 +47,20 @@ if [ "${#MISSING_CMDS[@]}" -gt 0 ]; then
   $INSTALL_CMD "${MISSING_CMDS[@]}"
 else
   echo "✅ 所有依赖已满足"
+
+# === cloudflared 安装逻辑（补充） ===
+if ! command -v cloudflared &>/dev/null; then
+  echo "📦 正在尝试安装 cloudflared（二进制方式）..."
+  curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+  chmod +x /usr/local/bin/cloudflared
+  if ! command -v cloudflared &>/dev/null; then
+    echo "❌ cloudflared 安装失败，请手动安装 https://developers.cloudflare.com/cloudflared/"
+    exit 1
+  fi
+else
+  echo "✅ cloudflared 已安装"
+fi
+
 fi
 
 

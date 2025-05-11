@@ -7,17 +7,17 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# === 检查发行版类型 ===
+# === 系统识别 ===
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   DISTRO=$ID
   VERSION=$VERSION_CODENAME
 else
-  echo "❌ 无法识别系统类型，无法自动安装依赖"
+  echo "❌ 无法识别系统类型"
   exit 1
 fi
 
-# === 选择安装命令 ===
+# === 包管理器 ===
 if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
   INSTALL_CMD="apt install -y"
   UPDATE_CMD="apt update"
@@ -28,22 +28,20 @@ elif [[ "$DISTRO" == "arch" ]]; then
   INSTALL_CMD="pacman -Syu --noconfirm"
   UPDATE_CMD="pacman -Sy"
 else
-  echo "❌ 当前系统 $DISTRO 暂不支持自动安装依赖，请手动安装：curl unzip socat jq cron qrencode uuidgen cloudflared"
+  echo "❌ 不支持的系统: $DISTRO"
   exit 1
 fi
 
-# === 检查依赖 ===
+# === 依赖 ===
 REQUIRED_CMDS=("curl" "unzip" "socat" "jq" "cron" "qrencode" "uuidgen")
 MISSING_CMDS=()
-
 for cmd in "${REQUIRED_CMDS[@]}"; do
   if ! command -v "$cmd" &>/dev/null; then
     MISSING_CMDS+=("$cmd")
   fi
 done
-
 if [ "${#MISSING_CMDS[@]}" -gt 0 ]; then
-  echo "🔧 检测到缺失依赖，正在安装: ${MISSING_CMDS[*]}"
+  echo "🔧 安装缺失依赖: ${MISSING_CMDS[*]}"
   $UPDATE_CMD
   $INSTALL_CMD "${MISSING_CMDS[@]}"
 else
@@ -52,47 +50,24 @@ fi
 
 # === 安装 cloudflared ===
 if ! command -v cloudflared &>/dev/null; then
-  echo "📦 cloudflared 未安装，尝试安装..."
-
-  INSTALL_FAILED=false
-
-  if [[ "$DISTRO" == "ubuntu" && "$VERSION" != "noble" ]]; then
-    mkdir -p /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $VERSION main" > /etc/apt/sources.list.d/cloudflared.list
-    apt update
-    apt install -y cloudflared || INSTALL_FAILED=true
-  else
-    INSTALL_FAILED=true
-  fi
-
-  if [ "$INSTALL_FAILED" = true ]; then
-    echo "📦 APT 安装失败或不支持 noble，使用二进制方式安装 cloudflared"
-    ARCH=$(uname -m)
-    case "$ARCH" in
-      x86_64) CFBIN="cloudflared-linux-amd64" ;;
-      aarch64|arm64) CFBIN="cloudflared-linux-arm64" ;;
-      armv7l|arm) CFBIN="cloudflared-linux-arm" ;;
-      *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
-    esac
-    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/$CFBIN" -o /usr/local/bin/cloudflared
-    chmod +x /usr/local/bin/cloudflared
-  fi
-
-  if ! command -v cloudflared &>/dev/null; then
-    echo "❌ cloudflared 安装失败，请手动安装 https://developers.cloudflare.com/cloudflared/"
-    exit 1
-  fi
-  echo "✅ cloudflared 已安装"
-else
-  echo "✅ cloudflared 已安装"
+  echo "📦 安装 cloudflared..."
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64) CFBIN="cloudflared-linux-amd64" ;;
+    aarch64|arm64) CFBIN="cloudflared-linux-arm64" ;;
+    armv7l|arm) CFBIN="cloudflared-linux-arm" ;;
+    *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
+  esac
+  curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/$CFBIN" -o /usr/local/bin/cloudflared
+  chmod +x /usr/local/bin/cloudflared
 fi
+echo "✅ cloudflared 已安装"
 
-# === 配置变量 ===
+# === 变量配置 ===
 UUID=$(uuidgen)
 PORT=$(shuf -i 20001-59999 -n 1)
 DOMAIN="sbu.frankcn.dpdns.org"
-CF_API_TOKEN="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"  # 替换为你的 token
+CF_API_TOKEN="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"
 EMAIL="frankcn@outlook.com"
 WS_PATH="/vless"
 TUNNEL_NAME="vless-ws"
@@ -104,18 +79,17 @@ KEY_PATH="$SBOX_DIR/private.key"
 LOG_PATH="/var/log/acme_renew.log"
 CONFIG_YML="$HOME/.cloudflared/config.yml"
 
-$UPDATE_CMD
-$INSTALL_CMD curl unzip socat jq cron qrencode
-
-# === 安装 acme.sh 并申请证书 ===
+# === 安装 acme.sh 并使用 Let's Encrypt ===
 if ! command -v acme.sh &>/dev/null; then
   curl https://get.acme.sh | sh
-  source ~/.bashrc
+  source ~/.bashrc || true
 fi
-
 export CF_Token="$CF_API_TOKEN"
 export CF_Email="$EMAIL"
+~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+~/.acme.sh/acme.sh --register-account -m "$EMAIL"
 ~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256
+
 mkdir -p "$SBOX_DIR"
 ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
   --key-file "$KEY_PATH" \
@@ -168,7 +142,7 @@ systemctl daemon-reload
 systemctl enable sing-box
 systemctl restart sing-box
 
-# === 配置 Cloudflare Tunnel ===
+# === Cloudflare Tunnel ===
 cloudflared login || true
 cloudflared tunnel delete "$TUNNEL_NAME" || true
 rm -f "$HOME/.cloudflared/$TUNNEL_NAME.json"
@@ -207,6 +181,7 @@ systemctl daemon-reload
 systemctl enable cloudflared@"$TUNNEL_NAME"
 systemctl restart cloudflared@"$TUNNEL_NAME"
 
+# === 展示导入链接 ===
 LINK="vless://$UUID@$DOMAIN:443?encryption=none&security=tls&type=ws&host=$DOMAIN&path=$WS_PATH#VLESS-CFTunnel"
 
 echo

@@ -1,12 +1,63 @@
 #!/bin/bash
 
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ 请以 root 用户身份运行此脚本（使用 sudo）"
+  exit 1
+fi
+
+
+# === 检查发行版类型 ===
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  DISTRO=$ID
+else
+  echo "❌ 无法识别系统类型，无法自动安装依赖"
+  exit 1
+fi
+
+# === 选择安装命令 ===
+if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
+  INSTALL_CMD="apt install -y"
+  UPDATE_CMD="apt update"
+elif [[ "$DISTRO" =~ ^(centos|rhel|almalinux|rocky)$ ]]; then
+  INSTALL_CMD="yum install -y"
+  UPDATE_CMD="yum makecache"
+elif [[ "$DISTRO" == "arch" ]]; then
+  INSTALL_CMD="pacman -Syu --noconfirm"
+  UPDATE_CMD="pacman -Sy"
+else
+  echo "❌ 当前系统 $DISTRO 暂不支持自动安装依赖，请手动安装：curl unzip socat jq cron qrencode uuidgen cloudflared"
+  exit 1
+fi
+
+
+# === 检查依赖 ===
+REQUIRED_CMDS=("curl" "unzip" "socat" "jq" "cron" "qrencode" "uuidgen" "cloudflared")
+MISSING_CMDS=()
+
+for cmd in "${REQUIRED_CMDS[@]}"; do
+  if ! command -v "$cmd" &>/dev/null; then
+    MISSING_CMDS+=("$cmd")
+  fi
+done
+
+if [ "${#MISSING_CMDS[@]}" -gt 0 ]; then
+  echo "🔧 检测到缺失依赖，正在安装: ${MISSING_CMDS[*]}"
+  $UPDATE_CMD
+  $INSTALL_CMD "${MISSING_CMDS[@]}"
+else
+  echo "✅ 所有依赖已满足"
+fi
+
+
+
 set -e
 
-UUID="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"
-PORT=23523
+UUID=$(uuidgen)
+PORT=$(shuf -i 20001-59999 -n 1)
 DOMAIN="sbu.frankcn.dpdns.org"
-CF_API_TOKEN="你的CF_API_Token"  # 替换
-EMAIL="frank.cn@outlook.com"
+CF_API_TOKEN="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"  # 替换
+EMAIL="frankcn@outlook.com"
 WS_PATH="/vless"
 TUNNEL_NAME="vless-ws"
 
@@ -17,7 +68,7 @@ KEY_PATH="$SBOX_DIR/private.key"
 LOG_PATH="/var/log/acme_renew.log"
 CONFIG_YML="$HOME/.cloudflared/config.yml"
 
-apt update
+$UPDATE_CMD
 apt install -y curl unzip socat jq cron qrencode cloudflared
 
 if ! command -v acme.sh &>/dev/null; then

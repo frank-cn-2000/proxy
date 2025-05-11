@@ -9,7 +9,7 @@
 # ------------------------------------
 # 将 YOUR_DOMAIN 替换为您的域名 (例如：vless.yourdomain.com)
 # 确保此域名已在 Cloudflare 解析，或者至少 NS 记录指向 Cloudflare。
-YOUR_DOMAIN=""
+YOUR_DOMAIN="frankcn.dpdns.org"
 # ------------------------------------
 # VLESS_UUID, SINGBOX_PORT, 和 WS_PATH 将在脚本运行时自动随机生成。
 # --- END OF USER CONFIGURABLE VARIABLES ---

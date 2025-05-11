@@ -1,15 +1,17 @@
 #!/bin/bash
 
+set -e
+
 if [ "$EUID" -ne 0 ]; then
   echo "❌ 请以 root 用户身份运行此脚本（使用 sudo）"
   exit 1
 fi
 
-
 # === 检查发行版类型 ===
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   DISTRO=$ID
+  VERSION=$VERSION_CODENAME
 else
   echo "❌ 无法识别系统类型，无法自动安装依赖"
   exit 1
@@ -30,9 +32,8 @@ else
   exit 1
 fi
 
-
 # === 检查依赖 ===
-REQUIRED_CMDS=("curl" "unzip" "socat" "jq" "cron" "qrencode" "uuidgen" "cloudflared")
+REQUIRED_CMDS=("curl" "unzip" "socat" "jq" "cron" "qrencode" "uuidgen")
 MISSING_CMDS=()
 
 for cmd in "${REQUIRED_CMDS[@]}"; do
@@ -47,39 +48,33 @@ if [ "${#MISSING_CMDS[@]}" -gt 0 ]; then
   $INSTALL_CMD "${MISSING_CMDS[@]}"
 else
   echo "✅ 所有依赖已满足"
+fi
 
-# === cloudflared 安装逻辑（支持多架构） ===
+# === 安装 cloudflared ===
 if ! command -v cloudflared &>/dev/null; then
-  echo "📦 cloudflared 未安装，开始检测系统与架构以选择安装方式..."
+  echo "📦 cloudflared 未安装，尝试安装..."
 
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    DISTRO=$ID
-    VERSION=$VERSION_CODENAME
-  else
-    echo "❌ 无法识别系统类型，默认采用二进制方式安装 cloudflared"
-    DISTRO="unknown"
-  fi
+  INSTALL_FAILED=false
 
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    x86_64) CFBIN="cloudflared-linux-amd64" ;;
-    aarch64|arm64) CFBIN="cloudflared-linux-arm64" ;;
-    armv7l|arm) CFBIN="cloudflared-linux-arm" ;;
-    *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
-  esac
-
-  if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
-    echo "🌐 尝试使用 APT 安装 cloudflared"
+  if [[ "$DISTRO" == "ubuntu" && "$VERSION" != "noble" ]]; then
     mkdir -p /usr/share/keyrings
     curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
     echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $VERSION main" > /etc/apt/sources.list.d/cloudflared.list
     apt update
     apt install -y cloudflared || INSTALL_FAILED=true
+  else
+    INSTALL_FAILED=true
   fi
 
-  if ! command -v cloudflared &>/dev/null || [ "$INSTALL_FAILED" = true ]; then
-    echo "📦 APT 安装失败，使用二进制方式安装 cloudflared ($CFBIN)"
+  if [ "$INSTALL_FAILED" = true ]; then
+    echo "📦 APT 安装失败或不支持 noble，使用二进制方式安装 cloudflared"
+    ARCH=$(uname -m)
+    case "$ARCH" in
+      x86_64) CFBIN="cloudflared-linux-amd64" ;;
+      aarch64|arm64) CFBIN="cloudflared-linux-arm64" ;;
+      armv7l|arm) CFBIN="cloudflared-linux-arm" ;;
+      *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
+    esac
     curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/$CFBIN" -o /usr/local/bin/cloudflared
     chmod +x /usr/local/bin/cloudflared
   fi
@@ -88,34 +83,16 @@ if ! command -v cloudflared &>/dev/null; then
     echo "❌ cloudflared 安装失败，请手动安装 https://developers.cloudflare.com/cloudflared/"
     exit 1
   fi
+  echo "✅ cloudflared 已安装"
 else
   echo "✅ cloudflared 已安装"
 fi
 
-
-# === cloudflared 安装逻辑（补充） ===
-if ! command -v cloudflared &>/dev/null; then
-  echo "📦 正在尝试安装 cloudflared（二进制方式）..."
-  curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-  chmod +x /usr/local/bin/cloudflared
-  if ! command -v cloudflared &>/dev/null; then
-    echo "❌ cloudflared 安装失败，请手动安装 https://developers.cloudflare.com/cloudflared/"
-    exit 1
-  fi
-else
-  echo "✅ cloudflared 已安装"
-fi
-
-fi
-
-
-
-set -e
-
+# === 配置变量 ===
 UUID=$(uuidgen)
 PORT=$(shuf -i 20001-59999 -n 1)
 DOMAIN="sbu.frankcn.dpdns.org"
-CF_API_TOKEN="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"  # 替换
+CF_API_TOKEN="suFUEdOxzo2yUvbN37qMSqWO08b2DtRTK2f4V1IP"  # 替换为你的 token
 EMAIL="frankcn@outlook.com"
 WS_PATH="/vless"
 TUNNEL_NAME="vless-ws"
@@ -128,8 +105,9 @@ LOG_PATH="/var/log/acme_renew.log"
 CONFIG_YML="$HOME/.cloudflared/config.yml"
 
 $UPDATE_CMD
-apt install -y curl unzip socat jq cron qrencode cloudflared
+$INSTALL_CMD curl unzip socat jq cron qrencode
 
+# === 安装 acme.sh 并申请证书 ===
 if ! command -v acme.sh &>/dev/null; then
   curl https://get.acme.sh | sh
   source ~/.bashrc
@@ -144,6 +122,7 @@ mkdir -p "$SBOX_DIR"
   --fullchain-file "$CERT_PATH" \
   --reloadcmd "systemctl restart sing-box && systemctl restart cloudflared@$TUNNEL_NAME >> $LOG_PATH 2>&1"
 
+# === 安装 sing-box ===
 curl -Lo /tmp/sing-box.zip https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-amd64.zip
 unzip -o /tmp/sing-box.zip -d /tmp/
 install -m 755 /tmp/sing-box /usr/local/bin/sing-box
@@ -189,6 +168,7 @@ systemctl daemon-reload
 systemctl enable sing-box
 systemctl restart sing-box
 
+# === 配置 Cloudflare Tunnel ===
 cloudflared login || true
 cloudflared tunnel delete "$TUNNEL_NAME" || true
 rm -f "$HOME/.cloudflared/$TUNNEL_NAME.json"
@@ -214,7 +194,7 @@ Description=Cloudflared Tunnel %i
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/cloudflared tunnel run %i
+ExecStart=/usr/local/bin/cloudflared tunnel run %i
 Restart=on-failure
 User=$(whoami)
 

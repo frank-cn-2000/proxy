@@ -1,22 +1,21 @@
 #!/bin/bash
 
 # Uninstallation script for VLESS + sing-box + Cloudflare Tunnel
-# Author: AI Assistant (Reads config.cfg for API token, uses Cloudflare API for DNS, NO MULTIPLE CONFIRMATIONS)
+# Author: AI Assistant (Reads API token from config.cfg IF NEEDED, does not modify config.cfg)
 
-# --- Configuration File for API Token ---
+# --- Configuration File for API Token (READ-ONLY for uninstall) ---
 CONFIG_FILE_NAME="config.cfg"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}" # Assumes config.cfg is next to script
-                                                # If using bash <(curl...), change to PWD:
-                                                # CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+# Determine script's own directory or PWD if piped
+SCRIPT_DIR_REAL=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd -P)
+CONFIG_FILE="${SCRIPT_DIR_REAL}/${CONFIG_FILE_NAME}"
 
 
-# --- State File ---
+# --- State File (Primary source for uninstall info) ---
 STATE_FILE="/etc/sing-box/install_details.env"
 
 # --- Global Variables ---
 CLOUDFLARE_API_ENDPOINT="https://api.cloudflare.com/client/v4"
-# CF_API_TOKEN, DOMAIN, ZONE_NAME will be loaded
+# CF_API_TOKEN, DOMAIN, ZONE_NAME, TUNNEL_ID, etc., will be loaded
 
 # --- Colors ---
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -29,39 +28,61 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 check_root() { if [ "$(id -u)" -ne 0 ]; then log_error "此脚本需要 root 权限运行。"; exit 1; fi; }
 
+# --- Load API Token (from config.cfg, read-only) ---
 load_api_token_from_config() {
-    if [ -n "$CF_API_TOKEN" ]; then return 0; fi
+    if [ -n "$CF_API_TOKEN" ]; then return 0; fi # Already set (e.g., by user env)
+
     # Adjust CONFIG_FILE path if script is piped
-    if [[ "$CONFIG_FILE" == "/dev/fd/${CONFIG_FILE_NAME}" || "$CONFIG_FILE" == "/proc/self/fd/${CONFIG_FILE_NAME}" ]]; then
+    if [[ "$CONFIG_FILE" == "/dev/fd/${CONFIG_FILE_NAME}" || "$CONFIG_FILE" == "/proc/self/fd/${CONFIG_FILE_NAME}" || "$SCRIPT_DIR_REAL" =~ ^/proc/[0-9]+/fd || -z "$SCRIPT_DIR_REAL" ]]; then
       CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
-      log_warning "脚本通过管道执行，尝试从当前工作目录加载API Token配置文件: $CONFIG_FILE" >&2
+      log_warning "脚本通过管道执行或无法确定脚本目录，尝试从当前工作目录加载API Token配置文件: $CONFIG_FILE"
     fi
 
-    if [ ! -f "$CONFIG_FILE" ]; then log_warning "配置文件 '$CONFIG_FILE' 未找到. 无法加载 API Token."; return 1; fi
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log_warning "配置文件 '$CONFIG_FILE' 未找到。如果需要通过 API 清理 DNS，请确保它存在并包含 CF_API_TOKEN。"
+        return 1
+    fi
+    # Read only the CF_API_TOKEN line to avoid sourcing unwanted variables from config.cfg
     local token_val=$(grep -E "^CF_API_TOKEN\s*=" "$CONFIG_FILE" | head -n1 | cut -d'=' -f2- | sed 's/^[ \t"]*//;s/[ \t"]*$//')
     if [[ -n "$token_val" && "$token_val" != "your_cloudflare_api_token_here" ]]; then
-        CF_API_TOKEN="$token_val"; log_info "从 '$CONFIG_FILE' 加载了 CF_API_TOKEN."; return 0
-    else log_warning "在 '$CONFIG_FILE' 中未找到或无效的 CF_API_TOKEN."; CF_API_TOKEN=""; return 1; fi
-}
-
-load_install_details() {
-    log_info "加载安装详情从: $STATE_FILE"
-    if [ -f "$STATE_FILE" ]; then source "$STATE_FILE"; log_success "安装详情加载成功."; else
-        log_warning "安装详情文件 '$STATE_FILE' 未找到.";
-        SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"; CLOUDFLARED_SERVICE_FILE="/etc/systemd/system/cloudflared.service"
-        SINGBOX_CONFIG_DIR="/etc/sing-box"; CLOUDFLARED_CONFIG_DIR="/etc/cloudflared"
-        SINGBOX_EXECUTABLE="/usr/local/bin/sing-box"; CLOUDFLARED_EXECUTABLE="/usr/local/bin/cloudflared"
-        CLOUDFLARED_CRED_DIR="/root/.cloudflared"; DOMAIN=""; ZONE_NAME=""
+        CF_API_TOKEN="$token_val"; log_info "从 '$CONFIG_FILE' (只读) 加载了 CF_API_TOKEN 用于 DNS 清理。"; return 0
+    else
+        log_warning "在 '$CONFIG_FILE' 中未找到或无效的 CF_API_TOKEN。将无法通过 API 清理 DNS。"; CF_API_TOKEN=""; return 1
     fi
 }
 
-# --- Cloudflare API Functions (Copied from install script) ---
+# --- Load Installation Details (from state file) ---
+load_install_details() {
+    log_info "加载安装详情从: $STATE_FILE"
+    if [ -f "$STATE_FILE" ]; then
+        # Source the state file carefully, it should only contain variable assignments
+        # Consider validating content or using grep/sed if concerned about arbitrary code
+        source "$STATE_FILE"
+        log_success "安装详情加载成功。"
+        # Variables like DOMAIN, ZONE_NAME, TUNNEL_ID, etc. are now available
+    else
+        log_warning "安装详情文件 '$STATE_FILE' 未找到。"
+        log_warning "将执行通用清理，但 Cloudflare 资源可能需要手动删除。"
+        # Set defaults to allow some cleanup even if state file is missing
+        SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
+        CLOUDFLARED_SERVICE_FILE="/etc/systemd/system/cloudflared.service"
+        SINGBOX_CONFIG_DIR="/etc/sing-box" # This also contains the state file normally
+        CLOUDFLARED_CONFIG_DIR="/etc/cloudflared"
+        SINGBOX_EXECUTABLE="/usr/local/bin/sing-box"
+        CLOUDFLARED_EXECUTABLE="/usr/local/bin/cloudflared"
+        CLOUDFLARED_CRED_DIR="/root/.cloudflared"
+        DOMAIN="" ZONE_NAME="" TUNNEL_ID="" TUNNEL_NAME="" # Explicitly clear these if state is missing
+    fi
+}
+
+# --- Cloudflare API Functions (Copied from install script, ensure they use loaded CF_API_TOKEN) ---
 cf_api_call() {
     local method="$1" path="$2" data="$3"
     local response_body http_code temp_file
     temp_file=$(mktemp)
+    local trimmed_cf_api_token=$(echo "$CF_API_TOKEN" | xargs) # Ensure token is clean
     local curl_opts=(-s -w "%{http_code}" \
-        -H "Authorization: Bearer ${CF_API_TOKEN}" \
+        -H "Authorization: Bearer ${trimmed_cf_api_token}" \
         -H "Content-Type: application/json" \
         -o "$temp_file")
     if [[ "$method" == "GET" || "$method" == "DELETE" ]]; then
@@ -78,23 +99,7 @@ cf_api_call() {
     fi; echo "$response_body"; return 0
 }
 get_zone_id() {
-    # Uses ZONE_NAME global variable, which should be loaded from state file or config
-    if [[ -z "$ZONE_NAME" ]]; then
-        log_warning "ZONE_NAME 未设置 (未从状态文件加载?). 尝试从主配置文件加载..."
-        if ! load_api_token_from_config; then # This also sets CF_API_TOKEN if not set. Now load ZONE_NAME
-            # Need to source config to get YOUR_ZONE_NAME if state file was missing
-            if [ -f "$CONFIG_FILE" ]; then
-                 local temp_zone_name=$(grep -E "^YOUR_ZONE_NAME\s*=" "$CONFIG_FILE" | head -n1 | cut -d'=' -f2- | sed 's/^[ \t"]*//;s/[ \t"]*$//')
-                 if [[ -n "$temp_zone_name" && "$temp_zone_name" != "example.com" && "$temp_zone_name" != "your_zone_name.com" ]]; then
-                     ZONE_NAME="$temp_zone_name"
-                 fi
-            fi
-        fi
-        if [[ -z "$ZONE_NAME" ]]; then
-             log_error "无法确定 Zone Name. 无法继续获取 Zone ID."
-             return 1
-        fi
-    fi
+    if [[ -z "$ZONE_NAME" ]]; then log_error "Zone Name 未知 (未从状态文件加载). 无法获取 Zone ID."; return 1; fi
     log_info "为 Zone Name '$ZONE_NAME' 获取 Zone ID..."
     local response=$(cf_api_call "GET" "/zones?name=${ZONE_NAME}&status=active&match=all") || return 1
     local zone_id=$(echo "$response" | jq -r '.result[] | select(.name == "'"$ZONE_NAME"'") | .id' | head -n1)
@@ -117,41 +122,43 @@ stop_and_disable_services() {
 
 remove_files_and_dirs() {
     log_info "删除相关文件和目录..."
+    # Use variables from state file (or defaults if state file was missing)
     local _sbsvc=${SINGBOX_SERVICE_FILE:-/etc/systemd/system/sing-box.service}
     local _cfdsvc=${CLOUDFLARED_SERVICE_FILE:-/etc/systemd/system/cloudflared.service}
     local _sbexe=${SINGBOX_EXECUTABLE:-/usr/local/bin/sing-box}
     local _cfdexe=${CLOUDFLARED_EXECUTABLE:-/usr/local/bin/cloudflared}
-    local _sbconfdir=${SINGBOX_CONFIG_DIR:-/etc/sing-box} # State file is in _sbconfdir
+    local _sbconfdir=${SINGBOX_CONFIG_DIR:-/etc/sing-box}
     local _cfdconfdir=${CLOUDFLARED_CONFIG_DIR:-/etc/cloudflared}
     local _cfdcreddir=${CLOUDFLARED_CRED_DIR:-/root/.cloudflared}
 
     for file_path in "$_sbsvc" "$_cfdsvc" "$_sbexe" "$_cfdexe"; do
         if [ -n "$file_path" ] && [ -f "$file_path" ]; then rm -f "$file_path"; log_success "删除: $file_path"; fi
     done
-    for dir_path in "$_sbconfdir" "$_cfdconfdir"; do
+    # Important: _sbconfdir contains the STATE_FILE itself. This should be last among config dirs.
+    for dir_path in "$_cfdconfdir" "$_sbconfdir"; do
         if [ -n "$dir_path" ] && [ -d "$dir_path" ]; then rm -rf "$dir_path"; log_success "删除目录: $dir_path"; fi
     done
 
-    # Handle Cloudflared credentials directory
     if [ -n "$TUNNEL_ID" ] && [ -f "${_cfdcreddir}/${TUNNEL_ID}.json" ]; then
         rm -f "${_cfdcreddir}/${TUNNEL_ID}.json"; log_success "删除特定 Tunnel 凭证: ${_cfdcreddir}/${TUNNEL_ID}.json"
     fi
-    # Optionally, clean up the entire .cloudflared directory if it only contained cert.pem or was related to this tunnel.
-    # This is a bit risky without explicit confirmation, so commented out for now.
-    # Users can manually remove /root/.cloudflared if they are sure.
-    # if [ -d "$_cfdcreddir" ]; then
-    #     log_warning "Cloudflare 凭证目录 ${_cfdcreddir} 仍然存在。如果不再需要，请手动删除。"
-    # fi
+    # We will NOT automatically delete the entire _cfdcreddir or cert.pem without explicit user action outside this script.
+    if [ -d "$_cfdcreddir" ]; then
+         log_warning "Cloudflare 凭证目录 '${_cfdcreddir}' 及其中的 'cert.pem' (账户级凭证) 未被此脚本自动删除。"
+         log_warning "如果不再需要，请评估后手动删除。"
+    fi
     systemctl daemon-reload
 }
 
 cleanup_cloudflare_dns_api() {
     log_info "通过 API 清理 '$DOMAIN' 的 Cloudflare DNS CNAME 记录..."
-    if ! load_api_token_from_config; then log_warning "无法加载 API Token. 跳过 API DNS 清理."; return 1; fi
-    if [[ -z "$CF_API_TOKEN" ]]; then log_warning "未提供 CF_API_TOKEN. 跳过 API DNS 清理."; return 1; fi
-    if [[ -z "$DOMAIN" ]]; then log_warning "域名未知 (未从状态文件加载). 无法清理 DNS."; return 1; fi
+    if [[ -z "$DOMAIN" ]]; then log_warning "域名未知 (未从状态文件加载). 无法通过API清理 DNS."; return 1; fi
+    if ! load_api_token_from_config; then return 1; fi # Try to load token if not already set
+    if [[ -z "$CF_API_TOKEN" ]]; then log_warning "未提供或加载 CF_API_TOKEN. 无法通过 API 清理 DNS."; return 1; fi
+    if [[ -z "$ZONE_NAME" ]]; then log_warning "Zone Name 未知 (未从状态文件加载). 无法通过 API 清理 DNS."; return 1; fi
 
-    local CF_ZONE_ID=$(get_zone_id) || { log_error "无法获取 Zone ID. 无法清理 DNS."; return 1; } # Uses global ZONE_NAME
+
+    local CF_ZONE_ID=$(get_zone_id) || { return 1; } # Uses global ZONE_NAME loaded from state
     local existing_records_response=$(cf_api_call "GET" "/zones/${CF_ZONE_ID}/dns_records?type=CNAME&name=${DOMAIN}")
     if [ $? -ne 0 ]; then log_error "查询现有 DNS 记录失败 (用于删除)."; return 1; fi
 
@@ -159,17 +166,30 @@ cleanup_cloudflare_dns_api() {
     local current_content=$(echo "$existing_records_response" | jq -r '.result[] | select(.name == "'"$DOMAIN"'") | .content' | head -n 1)
 
     if [[ -n "$record_id" && "$record_id" != "null" ]]; then
-        if [[ "$current_content" == *".cfargotunnel.com"* ]]; then
-            log_info "找到 CNAME (ID: $record_id, 内容: $current_content). 正在删除..."
+        # Only delete if it looks like a tunnel record (points to .cfargotunnel.com)
+        # And matches the TUNNEL_ID from state file if available (more safety)
+        local expected_cname_part="${TUNNEL_ID}.cfargotunnel.com"
+        if [[ "$current_content" == *".cfargotunnel.com"* ]] && { [[ -z "$TUNNEL_ID" ]] || [[ "$current_content" == "$expected_cname_part" ]]; }; then
+            log_info "找到匹配的 CNAME (ID: $record_id, 内容: $current_content). 正在删除..."
             local delete_response=$(cf_api_call "DELETE" "/zones/${CF_ZONE_ID}/dns_records/${record_id}")
-            if [ $? -eq 0 ] && echo "$delete_response" | jq -e '.success == true' > /dev/null; then log_success "CNAME (ID: $record_id) 删除成功."; else log_error "CNAME 删除失败."; fi
-        else log_warning "找到 CNAME (ID: $record_id), 但内容 ($current_content) 不像 Tunnel 记录. 跳过 API 删除."; fi
+            if [ $? -eq 0 ] && echo "$delete_response" | jq -e '.success == true' > /dev/null; then
+                 log_success "CNAME (ID: $record_id) 删除成功."
+            else
+                 log_error "CNAME 删除失败."
+            fi
+        else
+             log_warning "找到 CNAME (ID: $record_id), 但其内容 ($current_content) 与预期的 Tunnel 记录 ($expected_cname_part) 不完全匹配或非 Tunnel 记录. 跳过 API 删除以策安全."
+        fi
     else log_info "未找到 '$DOMAIN' 的 CNAME 记录, 无需通过 API 删除."; fi
 }
 
 list_dependencies() {
-    log_info "已安装依赖: curl, jq, unzip, uuid-runtime, qrencode"
-    log_info "如需卸载: sudo apt autoremove --purge curl jq unzip uuid-runtime qrencode"
+    log_info "此部署脚本可能已安装以下依赖项:"
+    echo -e "${YELLOW}  curl, jq, unzip, uuid-runtime, qrencode${NC}" >&2 # Ensure this goes to stderr
+    log_info "这些是通用工具，可能被系统上其他应用使用。"
+    log_info "如果您确定不再需要它们，可以运行以下命令手动卸载:"
+    echo -e "${YELLOW}  sudo apt autoremove --purge curl jq unzip uuid-runtime qrencode${NC}" >&2
+    log_warning "请谨慎操作，确保不会影响其他系统功能。"
 }
 
 # --- Main Uninstallation Script ---
@@ -185,12 +205,17 @@ main_uninstall() {
     load_install_details # Loads DOMAIN, ZONE_NAME, TUNNEL_ID, etc. from state file
     stop_and_disable_services
     
-    cleanup_cloudflare_dns_api # Attempt to delete CNAME via API
+    # Attempt to delete CNAME via API using info from state file
+    if [[ -n "$DOMAIN" && -n "$ZONE_NAME" ]]; then # Only attempt if we have enough info
+        cleanup_cloudflare_dns_api
+    else
+        log_warning "状态文件中缺少 DOMAIN 或 ZONE_NAME，跳过 API DNS 清理。"
+    fi
 
+    # Delete the Tunnel entity itself using cloudflared CLI
     if [ -n "$TUNNEL_ID" ] || [ -n "$TUNNEL_NAME" ]; then
-        local tunnel_ref_for_delete="${TUNNEL_ID:-$TUNNEL_NAME}"
+        local tunnel_ref_for_delete="${TUNNEL_ID:-$TUNNEL_NAME}" # Prefer ID
         log_info "尝试使用 cloudflared CLI 删除 Tunnel 实体: $tunnel_ref_for_delete"
-        # For non-interactive deletion, cloudflared typically doesn't need -y for `delete`
         if cloudflared tunnel delete "$tunnel_ref_for_delete"; then
             log_success "Cloudflare Tunnel '$tunnel_ref_for_delete' 删除请求已提交."
         else log_warning "Cloudflare Tunnel '$tunnel_ref_for_delete' 删除请求失败. 可能需手动删除."; fi

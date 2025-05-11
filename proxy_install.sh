@@ -48,6 +48,51 @@ if [ "${#MISSING_CMDS[@]}" -gt 0 ]; then
 else
   echo "✅ 所有依赖已满足"
 
+# === cloudflared 安装逻辑（支持多架构） ===
+if ! command -v cloudflared &>/dev/null; then
+  echo "📦 cloudflared 未安装，开始检测系统与架构以选择安装方式..."
+
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    DISTRO=$ID
+    VERSION=$VERSION_CODENAME
+  else
+    echo "❌ 无法识别系统类型，默认采用二进制方式安装 cloudflared"
+    DISTRO="unknown"
+  fi
+
+  ARCH=$(uname -m)
+  case "$ARCH" in
+    x86_64) CFBIN="cloudflared-linux-amd64" ;;
+    aarch64|arm64) CFBIN="cloudflared-linux-arm64" ;;
+    armv7l|arm) CFBIN="cloudflared-linux-arm" ;;
+    *) echo "❌ 不支持的架构: $ARCH"; exit 1 ;;
+  esac
+
+  if [[ "$DISTRO" =~ ^(ubuntu|debian)$ ]]; then
+    echo "🌐 尝试使用 APT 安装 cloudflared"
+    mkdir -p /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $VERSION main" > /etc/apt/sources.list.d/cloudflared.list
+    apt update
+    apt install -y cloudflared || INSTALL_FAILED=true
+  fi
+
+  if ! command -v cloudflared &>/dev/null || [ "$INSTALL_FAILED" = true ]; then
+    echo "📦 APT 安装失败，使用二进制方式安装 cloudflared ($CFBIN)"
+    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/$CFBIN" -o /usr/local/bin/cloudflared
+    chmod +x /usr/local/bin/cloudflared
+  fi
+
+  if ! command -v cloudflared &>/dev/null; then
+    echo "❌ cloudflared 安装失败，请手动安装 https://developers.cloudflare.com/cloudflared/"
+    exit 1
+  fi
+else
+  echo "✅ cloudflared 已安装"
+fi
+
+
 # === cloudflared 安装逻辑（补充） ===
 if ! command -v cloudflared &>/dev/null; then
   echo "📦 正在尝试安装 cloudflared（二进制方式）..."

@@ -356,8 +356,9 @@ generate_client_configs() {
 
     local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)-$(echo $FAKE_HOST | cut -d'.' -f1)"
     local ENCODED_WS_PATH=$(urlencode "${WS_PATH}")
-    local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
-    # 注意 VLESS 链接中的参数:
+    local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}") # Remark 标签也进行 URL 编码以确保安全
+
+    # VLESS 链接参数:
     # server (address): 仍然是你的 $DOMAIN
     # sni: 仍然是你的 $DOMAIN
     # host (WebSocket Host): 修改为 $FAKE_HOST
@@ -381,7 +382,8 @@ generate_client_configs() {
     qrencode -t ANSIUTF8 "${VLESS_LINK}"
     echo -e "--------------------------------------------------"
     echo -e "${BLUE}Sing-box 客户端配置片段 (JSON):${NC}"
-    # 注意 JSON 中的对应字段
+    # 调整 JSON 结构以符合 Xray/Sing-box 的新建议/标准实践
+    # Sing-box 的 WebSocket transport 直接支持 "host" 字段
     jq -n \
       --arg tag "$REMARK_TAG" \
       --arg server "$DOMAIN" \
@@ -399,14 +401,18 @@ generate_client_configs() {
       "tls": {
         "enabled": true,
         "server_name": $sni, 
-        "insecure": false 
+        "insecure": false
+        // 如果需要指定ALPN (通常Cloudflare Tunnel会自动处理与客户端的协商)
+        // "alpn": ["h2", "http/1.1"] 
       },
       "transport": {
         "type": "ws",
         "path": $path,
-        "headers": {
-          "Host": $ws_host
-        }
+        "host": $ws_host // WebSocket Host 直接在 transport 下，而不是 headers 内
+        // 如果没有任何其他自定义 HTTP 头部， "headers": {} 对象可以完全省略
+        // "headers": {
+        //   "User-Agent": "MyCustomClient" // 示例自定义头部
+        // }
       }
     }'
     echo -e "--------------------------------------------"

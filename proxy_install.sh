@@ -80,18 +80,19 @@ LOG_PATH="/var/log/acme_renew.log"
 CONFIG_YML="$HOME/.cloudflared/config.yml"
 
 # === 安装 acme.sh 并使用 Let's Encrypt ===
-if ! command -v acme.sh &>/dev/null; then
+if [ ! -f /root/.acme.sh/acme.sh ]; then
   curl https://get.acme.sh | sh
-  source ~/.bashrc || true
 fi
+
 export CF_Token="$CF_API_TOKEN"
 export CF_Email="$EMAIL"
-~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-~/.acme.sh/acme.sh --register-account -m "$EMAIL"
-~/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256
+
+/root/.acme.sh/acme.sh --set-default-ca --server letsencrypt
+/root/.acme.sh/acme.sh --register-account -m "$EMAIL"
+/root/.acme.sh/acme.sh --issue --dns dns_cf -d "$DOMAIN" --keylength ec-256
 
 mkdir -p "$SBOX_DIR"
-~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+/root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
   --key-file "$KEY_PATH" \
   --fullchain-file "$CERT_PATH" \
   --reloadcmd "systemctl restart sing-box && systemctl restart cloudflared@$TUNNEL_NAME >> $LOG_PATH 2>&1"

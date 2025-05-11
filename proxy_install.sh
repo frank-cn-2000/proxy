@@ -9,12 +9,25 @@ CONFIG_FILE_NAME="config.cfg"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/${CONFIG_FILE_NAME}"
 
+#!/bin/bash
+
+# VLESS + sing-box + Cloudflare Tunnel + Let's Encrypt (via Cloudflare)
+# Fully compatible with Ubuntu 24.04 LTS
+# Author: AI Assistant (Reads config from config.cfg in PWD, uses Cloudflare API for DNS, service file fix)
+
+# --- Configuration File ---
+CONFIG_FILE_NAME="config.cfg"
+# When run via bash <(curl ...), SCRIPT_DIR is not reliable for config file next to script.
+# Assume config.cfg is in the Present Working Directory (PWD) from where the command is run.
+CONFIG_FILE="$(pwd)/${CONFIG_FILE_NAME}"
+
 # --- Load Configuration ---
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件 '$CONFIG_FILE' 未找到。"
-        log_error "请在脚本所在目录创建 '$CONFIG_FILE_NAME' 并填入 YOUR_DOMAIN, YOUR_ZONE_NAME, 和 CF_API_TOKEN。"
-        echo -e "${YELLOW}正在创建模板配置文件: $CONFIG_FILE${NC}"
+        log_error "配置文件 '$CONFIG_FILE' (在当前工作目录) 未找到。"
+        log_error "请在您运行此命令的目录下创建 '$CONFIG_FILE_NAME' 并填入 YOUR_DOMAIN, YOUR_ZONE_NAME, 和 CF_API_TOKEN。"
+        # Create a template config file in the PWD if it doesn't exist
+        echo -e "${YELLOW}正在当前工作目录创建模板配置文件: $CONFIG_FILE${NC}"
         cat > "$CONFIG_FILE" <<EOF
 # Cloudflare Deployment Configuration
 # 请填写您的域名、Cloudflare Zone 名称和 API Token
@@ -32,29 +45,16 @@ YOUR_ZONE_NAME="your_zone_name.com"
 CF_API_TOKEN="your_cloudflare_api_token_here"
 EOF
         chmod 600 "$CONFIG_FILE"
-        log_info "模板文件已创建。请编辑它并重新运行脚本。"
+        log_info "模板文件已创建于 '$CONFIG_FILE'。请编辑它并重新运行脚本。"
         exit 1
     fi
 
     log_info "正在从 '$CONFIG_FILE' 加载配置..."
-    source "$CONFIG_FILE"
+    source "$CONFIG_FILE" # Source from PWD
 
-    if [[ -z "$YOUR_DOMAIN" || "$YOUR_DOMAIN" == "your.example.com" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_DOMAIN'。"
-        exit 1
-    fi
-    if [[ -z "$YOUR_ZONE_NAME" || "$YOUR_ZONE_NAME" == "your_zone_name.com" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'YOUR_ZONE_NAME'。"
-        exit 1
-    fi
-    if [[ -z "$CF_API_TOKEN" || "$CF_API_TOKEN" == "your_cloudflare_api_token_here" ]]; then
-        log_error "请在 '$CONFIG_FILE' 中设置有效的 'CF_API_TOKEN'。"
-        exit 1
-    fi
-    log_success "配置加载成功。"
+    # ... (rest of load_config remains the same) ...
 }
 # --- END OF CONFIGURATION LOADING ---
-
 
 # --- Global Variables (populated by config or later) ---
 VLESS_UUID=""

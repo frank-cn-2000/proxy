@@ -352,28 +352,23 @@ EOF
 
 generate_client_configs() {
     local FAKE_HOST="netflix.com" # 定义伪装域名
-    log_info "为客户端配置生成信息 (SNI: ${DOMAIN}, WebSocket Host: ${FAKE_HOST})..." >&2 # 日志输出到 stderr
+    log_info "为客户端配置生成信息 (SNI: ${DOMAIN}, WebSocket Host: ${FAKE_HOST})..." >&2
 
     local REMARK_TAG="VLESS-CF-$(echo $DOMAIN | cut -d'.' -f1)-$(echo $FAKE_HOST | cut -d'.' -f1)"
     local ENCODED_WS_PATH=$(urlencode "${WS_PATH}")
-    local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}") # Remark 标签也进行 URL 编码以确保安全
+    local ENCODED_REMARK_TAG=$(urlencode "${REMARK_TAG}")
 
-    # VLESS 链接参数:
-    # server (address): 仍然是你的 $DOMAIN
-    # sni: 仍然是你的 $DOMAIN
-    # host (WebSocket Host): 修改为 $FAKE_HOST
     local VLESS_LINK="vless://${VLESS_UUID}@${DOMAIN}:443?encryption=none&security=tls&sni=${DOMAIN}&type=ws&host=${FAKE_HOST}&path=${ENCODED_WS_PATH}#${ENCODED_REMARK_TAG}"
 
-    # --- 输出到 stdout 给用户 ---
     echo -e "---------------- VLESS 配置 ----------------"
     echo -e "${YELLOW}域名 (Address/Server):${NC} ${DOMAIN}"
     echo -e "${YELLOW}端口 (Port):${NC} 443"
     echo -e "${YELLOW}用户 ID (UUID):${NC} ${VLESS_UUID}"
     echo -e "${YELLOW}传输协议 (Network):${NC} ws (WebSocket)"
     echo -e "${YELLOW}WebSocket 路径 (Path):${NC} ${WS_PATH}"
-    echo -e "${YELLOW}WebSocket Host (伪装域名):${NC} ${FAKE_HOST}" # 显示伪装域名
+    echo -e "${YELLOW}WebSocket Host (伪装域名):${NC} ${FAKE_HOST}"
     echo -e "${YELLOW}TLS/SSL:${NC} tls (由 Cloudflare 提供)"
-    echo -e "${YELLOW}SNI (Server Name Indication):${NC} ${DOMAIN}" # SNI 必须是真实域名
+    echo -e "${YELLOW}SNI (Server Name Indication):${NC} ${DOMAIN}"
     echo -e "--------------------------------------------------"
     echo -e "${GREEN}VLESS 链接:${NC}"
     echo -e "${VLESS_LINK}"
@@ -382,8 +377,8 @@ generate_client_configs() {
     qrencode -t ANSIUTF8 "${VLESS_LINK}"
     echo -e "--------------------------------------------------"
     echo -e "${BLUE}Sing-box 客户端配置片段 (JSON):${NC}"
-    # 调整 JSON 结构以符合 Xray/Sing-box 的新建议/标准实践
-    # Sing-box 的 WebSocket transport 直接支持 "host" 字段
+    # 注意：jq 处理的字符串不能包含 // 注释
+    # 如果需要注释，请放在 jq 命令的输入字符串之外，或者使用 jq 的 # 注释（但通常用于 jq 程序本身，而非输入JSON）
     jq -n \
       --arg tag "$REMARK_TAG" \
       --arg server "$DOMAIN" \
@@ -402,21 +397,25 @@ generate_client_configs() {
         "enabled": true,
         "server_name": $sni, 
         "insecure": false
-        // 如果需要指定ALPN (通常Cloudflare Tunnel会自动处理与客户端的协商)
-        // "alpn": ["h2", "http/1.1"] 
       },
       "transport": {
         "type": "ws",
         "path": $path,
-        "host": $ws_host // WebSocket Host 直接在 transport 下，而不是 headers 内
-        // 如果没有任何其他自定义 HTTP 头部， "headers": {} 对象可以完全省略
-        // "headers": {
-        //   "User-Agent": "MyCustomClient" // 示例自定义头部
-        // }
+        "host": $ws_host
       }
     }'
+    # 如果需要 headers 对象（例如用于自定义 User-Agent），可以这样添加：
+    #  "transport": {
+    #    "type": "ws",
+    #    "path": $path,
+    #    "host": $ws_host,
+    #    "headers": {
+    #      "User-Agent": "MyCustomClient"
+    #    }
+    #  }
+    # 但如果只是为了设置 Host，则不需要 headers 对象了。
+
     echo -e "--------------------------------------------"
-    # --- 结束输出到 stdout ---
 }
 
 urlencode() {
